@@ -1,0 +1,12 @@
+intrinsics:
+  fx: 721.5377
+  fy: 721.5377
+  cx: 609.5593
+  cy: 172.8540
+  width: 1242
+  height: 375
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+extrinsics:
+  camera_height_m: 1.65
+  pitch_deg: 2.5
