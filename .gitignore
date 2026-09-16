@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Modelos, motores TensorRT y pesos binarios
+*.engine
+*.plan
+*.onnx
+*.pt
+*.pth
+weights/
+checkpoints/
+
+# Datos y datasets
+data/raw/*
+!data/raw/.gitkeep
+data/outputs/*
+!data/outputs/.gitkeep
+*.pcap
+*.bag
+
+# Logs y profiling
+*.log
+*.rrd
+*.prof
+runs/
+
+# Entorno de compilación local y SO
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+build/
+dist/
+*.egg-info/

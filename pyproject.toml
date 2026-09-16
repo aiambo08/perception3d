@@ -1,0 +1,44 @@
+[project]
+name = "percepcion3d"
+version = "0.1.0"
+description = "Edge-Ready 3D Spatial Perception and Metric Tracking Pipeline"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+authors = [{ name = "Perception Team" }]
+dependencies = [
+    "numpy>=1.26.4,<2.0.0",
+    "opencv-python-headless>=4.10.0.84",
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "tensorrt-cu12>=10.3.0",
+    "cuda-python>=12.4.0",
+    "rerun-sdk>=0.18.0",
+    "pyyaml>=6.0.2",
+    "scipy>=1.13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-benchmark>=4.0.0",
+    "mypy>=1.11.0",
+    "ruff>=0.6.0",
+    "types-PyYAML>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
