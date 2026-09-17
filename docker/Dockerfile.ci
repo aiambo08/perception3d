@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    UV_SYSTEM_PYTHON=1
+
+# System dependencies for OpenCV headless and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libglib2.0-0 \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv package manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /workspace
+
+# Copy dependency manifests first for layer caching
+COPY pyproject.toml README.md ./
+
+# Install dependencies including dev group
+RUN uv pip install --system -e ".[dev]"
+
+# Copy repository source and tests
+COPY src/ src/
+COPY tests/ tests/
+COPY configs/ configs/
+
+# Default sanity command
+CMD ["pytest", "tests/", "-v", "-m", "not slow and not gpu"]
