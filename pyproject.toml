@@ -27,8 +27,11 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 line-length = 100
@@ -42,3 +45,9 @@ ignore = ["E501"]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests requiring hardware timing guarantees (deselect with '-m \"not slow\"')",
+    "gpu: marks tests requiring a CUDA-capable GPU (deselect with '-m \"not gpu\"')",
+]

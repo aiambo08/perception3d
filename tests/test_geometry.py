@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from percepcion3d.camera.calibration import (
     load_camera_config_yaml,
 )
 from percepcion3d.camera.geometry import PinholeGeometry
+from percepcion3d.camera.undistort import ImageRectifier
 
 
 @pytest.fixture
@@ -35,6 +37,7 @@ def kitti_geometry() -> PinholeGeometry:
 
 # ─── DoD §1: Geometric Reversibility ──────────────────────────────────────────
 
+
 @pytest.mark.parametrize(
     "p_orig",
     [
@@ -42,10 +45,10 @@ def kitti_geometry() -> PinholeGeometry:
         np.array([-1.5, 0.8, 8.5]),
         np.array([2.4, -0.4, 14.2]),
         np.array([-3.2, 1.2, 25.0]),
-        np.array([0.0, 1.65, 5.0]),     # on-ground-level
-        np.array([5.0, -2.0, 50.0]),    # far range
-        np.array([0.0, 0.0, 0.5]),      # near range boundary
-        np.array([-10.0, 5.0, 30.0]),   # lateral extreme
+        np.array([0.0, 1.65, 5.0]),  # on-ground-level
+        np.array([5.0, -2.0, 50.0]),  # far range
+        np.array([0.0, 0.0, 0.5]),  # near range boundary
+        np.array([-10.0, 5.0, 30.0]),  # lateral extreme
         np.array([3.0, 3.0, 10.0]),
         np.array([-5.0, -1.0, 20.0]),
     ],
@@ -61,6 +64,7 @@ def test_dod_geometric_reversibility(
 
 
 # ─── DoD §3: Horizon Gating ───────────────────────────────────────────────────
+
 
 def test_horizon_gate_rejection(kitti_geometry: PinholeGeometry) -> None:
     """Pixels at or above the horizon line must raise ValueError."""
@@ -83,6 +87,7 @@ def test_horizon_gate_rejection(kitti_geometry: PinholeGeometry) -> None:
 
 # ─── DoD §1+§3: Physical Invariant Z_c > d_long ──────────────────────────────
 
+
 @pytest.mark.parametrize("pitch_deg", [0.5, 1.0, 2.5, 5.0, 10.0])
 def test_z_cam_greater_than_d_long(pitch_deg: float) -> None:
     """Z_c_suelo must always exceed d_long when theta > 0 (hypotenuse > adjacent)."""
@@ -95,9 +100,7 @@ def test_z_cam_greater_than_d_long(pitch_deg: float) -> None:
         height=375,
         distortion_coeffs=np.zeros(5, dtype=np.float64),
     )
-    extrinsics = ExtrinsicMountConfig(
-        camera_height_m=1.65, pitch_rad=np.deg2rad(pitch_deg)
-    )
+    extrinsics = ExtrinsicMountConfig(camera_height_m=1.65, pitch_rad=np.deg2rad(pitch_deg))
     geom = PinholeGeometry(intrinsics, extrinsics)
     v_test = geom.get_horizon_v() + 20.0
     if v_test >= intrinsics.height:
@@ -110,6 +113,7 @@ def test_z_cam_greater_than_d_long(pitch_deg: float) -> None:
 
 # ─── DoD §2: Monotonicity ─────────────────────────────────────────────────────
 
+
 def test_ground_distance_monotonicity(kitti_geometry: PinholeGeometry) -> None:
     """d_long must decrease monotonically as v increases (closer objects lower in image)."""
     v_h = kitti_geometry.get_horizon_v()
@@ -118,14 +122,14 @@ def test_ground_distance_monotonicity(kitti_geometry: PinholeGeometry) -> None:
     for v in v_values:
         _, d_long = kitti_geometry.compute_ground_distances(float(v))
         assert d_long < prev_d_long, (
-            f"Monotonicity violated at v={v:.1f}: "
-            f"d_long={d_long:.4f} >= prev={prev_d_long:.4f}"
+            f"Monotonicity violated at v={v:.1f}: d_long={d_long:.4f} >= prev={prev_d_long:.4f}"
         )
         assert d_long > 0.0
         prev_d_long = d_long
 
 
 # ─── DoD §2: Defensive Coding ─────────────────────────────────────────────────
+
 
 def test_project_point_rejects_nonpositive_z(kitti_geometry: PinholeGeometry) -> None:
     """Points with Z <= 0 must raise ValueError."""
@@ -156,6 +160,7 @@ def test_negative_camera_height_rejected() -> None:
 
 # ─── DoD §4b: YAML Config Parsing ────────────────────────────────────────────
 
+
 def test_yaml_config_loading() -> None:
     """Validate config round-trip from configs/camera_kitti.yaml."""
     yaml_path = Path("configs/camera_kitti.yaml")
@@ -172,12 +177,7 @@ def test_yaml_config_loading() -> None:
 
 def test_yaml_missing_key_raises() -> None:
     """Missing required YAML keys must raise KeyError explicitly."""
-    bad_yaml = (
-        "intrinsics:\n"
-        "  fx: 700.0\n"
-        "extrinsics:\n"
-        "  camera_height_m: 1.5\n"
-    )
+    bad_yaml = "intrinsics:\n  fx: 700.0\nextrinsics:\n  camera_height_m: 1.5\n"
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False, encoding="utf-8"
     ) as tmp:
@@ -189,3 +189,31 @@ def test_yaml_missing_key_raises() -> None:
             load_camera_config_yaml(tmp_path)
     finally:
         tmp_path.unlink()
+
+
+@pytest.mark.slow
+def test_rectifier_latency_and_output_shape(kitti_geometry: PinholeGeometry) -> None:
+    """
+    DoD F0/F1: Verifies undistort preserves frame shape and executes within budget.
+    Marked slow — excluded from CI runners (requires dedicated hardware timing).
+    """
+    rectifier = ImageRectifier(kitti_geometry.intrinsics)
+    dummy_frame = np.zeros(
+        (kitti_geometry.intrinsics.height, kitti_geometry.intrinsics.width, 3),
+        dtype=np.uint8,
+    )
+
+    # Warmup
+    for _ in range(10):
+        _ = rectifier.rectify(dummy_frame)
+
+    # Timed loop (100 iterations)
+    start_time = time.perf_counter()
+    iterations = 100
+    for _ in range(iterations):
+        rectified = rectifier.rectify(dummy_frame)
+    elapsed_ms = ((time.perf_counter() - start_time) / iterations) * 1000.0
+
+    assert rectified.shape == dummy_frame.shape
+    # Host CPU execution should be well under 5ms; on GPU remap it is <= 1.5ms
+    assert elapsed_ms < 5.0, f"Undistortion too slow on CPU: {elapsed_ms:.2f} ms"
