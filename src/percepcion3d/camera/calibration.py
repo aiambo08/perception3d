@@ -55,9 +55,7 @@ class ExtrinsicMountConfig:
 
     def __post_init__(self) -> None:
         if self.camera_height_m <= 0.0:
-            raise ValueError(
-                f"camera_height_m must be > 0, got {self.camera_height_m}"
-            )
+            raise ValueError(f"camera_height_m must be > 0, got {self.camera_height_m}")
 
 
 def parse_kitti_calib_txt(

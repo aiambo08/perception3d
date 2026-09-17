@@ -30,9 +30,7 @@ class PinholeGeometry:
         self.intrinsics = intrinsics
         self.extrinsics = extrinsics
         # Precompute horizon pixel row for fast per-frame gating (no recomputation).
-        self._v_horizon: float = float(
-            intrinsics.cy - intrinsics.fy * np.tan(extrinsics.pitch_rad)
-        )
+        self._v_horizon: float = float(intrinsics.cy - intrinsics.fy * np.tan(extrinsics.pitch_rad))
 
     # ------------------------------------------------------------------
     # Projection / Deprojection
@@ -73,9 +71,7 @@ class PinholeGeometry:
         ray: NDArray[np.float64] = np.array([x, y, 1.0], dtype=np.float64)
         return ray / np.linalg.norm(ray)
 
-    def deproject_pixel_with_depth(
-        self, u: float, v: float, z_depth: float
-    ) -> NDArray[np.float64]:
+    def deproject_pixel_with_depth(self, u: float, v: float, z_depth: float) -> NDArray[np.float64]:
         """Reconstruct metric 3D point [X_c, Y_c, Z_c] from pixel and known optical depth Z.
 
         Note:

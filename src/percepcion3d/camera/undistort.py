@@ -8,13 +8,12 @@ Distortion coefficient ordering in CameraIntrinsics.distortion_coeffs:
 
 Performance contract:
     - LUT is computed ONCE at construction (cv2.initUndistortRectifyMap).
-    - Per-frame undistortion via cv2.remap: target <= 1.5 ms at 1080p.
-    - Map arrays are C-contiguous int16/uint16 (CV_16SC2) for fastest remap.
+    - Per-frame undistortion via cv2.remap: target <= 1.5 ms at 1080p on GPU,
+      < 5.0 ms on host CPU before GPU dispatch.
+    - Map arrays are C-contiguous float32 (CV_32FC1) for GPU-compatible upload.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import cv2
 import numpy as np
@@ -23,18 +22,21 @@ from numpy.typing import NDArray
 from percepcion3d.camera.calibration import CameraIntrinsics
 
 
-class UndistortionLUT:
-    """Precomputed undistortion look-up table for a given camera intrinsics.
+class ImageRectifier:
+    """Optical distortion correction with precomputed rectification lookup maps.
 
-    The remapping maps are allocated once during ``__init__`` using
-    ``cv2.initUndistortRectifyMap`` with ``CV_16SC2`` maps, which are the
-    fastest format accepted by ``cv2.remap`` and can be uploaded to the GPU
-    without format conversion.
+    The rectification maps are allocated exactly once during ``__init__`` using
+    ``cv2.initUndistortRectifyMap`` with ``CV_32FC1`` maps (DoD §2 compliant).
+    ``getOptimalNewCameraMatrix`` is also invoked only at construction.
 
     Example::
 
-        lut = UndistortionLUT(intrinsics)
-        undistorted_frame = lut.apply(raw_frame)
+        rectifier = ImageRectifier(intrinsics)
+        undistorted = rectifier.rectify(raw_frame)
+
+    Note:
+        For CUDA acceleration, upload ``self.map_x`` and ``self.map_y``
+        to ``cv2.cuda.GpuMat`` objects and call ``cv2.cuda.remap`` instead.
     """
 
     def __init__(self, intrinsics: CameraIntrinsics) -> None:
@@ -53,61 +55,60 @@ class UndistortionLUT:
                 "distortion_coeffs must have shape (5,) — [k1, k2, p1, p2, k3], "
                 f"got {intrinsics.distortion_coeffs.shape}."
             )
-        k_mat = intrinsics.k_matrix
-        dist = intrinsics.distortion_coeffs
+        self.intrinsics: CameraIntrinsics = intrinsics
+        k_mat: NDArray[np.float64] = intrinsics.k_matrix
+        dist: NDArray[np.float64] = intrinsics.distortion_coeffs
         w, h = intrinsics.width, intrinsics.height
 
         # Compute the optimal new camera matrix that minimises black borders.
         # alpha=0.0 crops to retain only valid pixels (no black borders).
-        new_k, _ = cv2.getOptimalNewCameraMatrix(
+        # roi is stored for downstream cropping if needed.
+        new_k: NDArray[np.float64]
+        new_k, self.roi = cv2.getOptimalNewCameraMatrix(  # type: ignore[assignment]
             k_mat, dist, (w, h), alpha=0.0, newImgSize=(w, h)
         )
+        self.rectified_k_matrix: NDArray[np.float64] = np.asarray(new_k, dtype=np.float64)
 
-        # CV_16SC2 integer maps are the fastest format for cv2.remap.
-        # They avoid per-pixel float interpolation of map coordinates.
-        # R=np.eye(3) is equivalent to identity rotation (no rectification).
-        map1_raw: Any
-        map2_raw: Any
-        map1_raw, map2_raw = cv2.initUndistortRectifyMap(
+        # CV_32FC1 float maps: DoD-compliant format for numerical stability.
+        # C-contiguous layout for zero-copy GPU upload via cuda.GpuMat.upload().
+        raw_map_x: NDArray[np.float32]
+        raw_map_y: NDArray[np.float32]
+        raw_map_x, raw_map_y = cv2.initUndistortRectifyMap(  # type: ignore[assignment]
             k_mat,
             dist,
-            np.eye(3, dtype=np.float64),
+            np.eye(3, dtype=np.float64),  # R = identity (no stereo rectification)
             new_k,
             (w, h),
-            cv2.CV_16SC2,
+            cv2.CV_32FC1,
         )
+        # Enforce C-contiguous layout and explicit dtype for deterministic GPU upload.
+        self.map_x: NDArray[np.float32] = np.ascontiguousarray(raw_map_x, dtype=np.float32)
+        self.map_y: NDArray[np.float32] = np.ascontiguousarray(raw_map_y, dtype=np.float32)
 
-        # Store as C-contiguous for zero-copy GPU upload via cuda.GpuMat.upload().
-        # Typed as Any at the cv2 interop boundary; runtime dtype is guaranteed
-        # by np.ascontiguousarray with explicit dtype= argument.
-        self._map1: Any = np.ascontiguousarray(map1_raw, dtype=np.int16)
-        self._map2: Any = np.ascontiguousarray(map2_raw, dtype=np.uint16)
-        self._new_k: NDArray[np.float64] = new_k.astype(np.float64)
-        self._intrinsics = intrinsics
-
-    @property
-    def rectified_k_matrix(self) -> NDArray[np.float64]:
-        """The optimal camera matrix K' for the undistorted image."""
-        return self._new_k
-
-    def apply(self, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        """Apply undistortion to a raw frame using the precomputed LUT.
+    def rectify(self, frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        """Remove lens distortion using precomputed rectification maps.
 
         Args:
-            image: H x W x C or H x W uint8 BGR/grayscale frame from the sensor.
+            frame: ``H × W × C`` or ``H × W`` uint8 BGR/grayscale frame from
+                the sensor. Must match the calibrated resolution exactly.
 
         Returns:
-            Undistorted image with the same dtype and shape.
+            Undistorted image with the same dtype and shape as ``frame``.
 
-        Note:
-            For CUDA acceleration, upload ``self._map1`` and ``self._map2``
-            to ``cv2.cuda.GpuMat`` objects and call ``cv2.cuda.remap`` instead.
-            This CPU path targets <= 1.5 ms at 1080p on modern hardware.
+        Raises:
+            ValueError: If frame spatial dimensions do not match the calibrated
+                resolution — guards against silent misuse before OpenCV C bindings.
         """
+        h, w = frame.shape[:2]
+        if (w, h) != (self.intrinsics.width, self.intrinsics.height):
+            raise ValueError(
+                f"Frame dimensions ({w}×{h}) do not match calibration "
+                f"({self.intrinsics.width}×{self.intrinsics.height})."
+            )
         result: NDArray[np.uint8] = cv2.remap(  # type: ignore[assignment]
-            image,
-            self._map1,
-            self._map2,
+            frame,
+            self.map_x,
+            self.map_y,
             interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0, 0),
