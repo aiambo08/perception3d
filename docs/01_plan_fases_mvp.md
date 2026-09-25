@@ -31,19 +31,31 @@ usando mediciones grabadas (JSON/NPZ) de F2/F3 y el generador sintético de F1.
 
 ---
 
-## F0.1 · Correcciones de geometría (cierre de fase 0)
+## F0.1 · Correcciones de geometría (cierre de fase 0) — ✔ implementado
 
 **Alcance**
 - `compute_ground_distances`: devolver `(z_c, d_long)` con
   $Z_c = h\cos\alpha/\sin(\theta+\alpha)$ (H1); exponer también `ray_length`
   si se necesita.
-- Versión vectorizada `ground_depth_for_rows(v: NDArray) -> (z_c, d_long, sigma_z)`
-  con el modelo de varianza de R2 (`sigma_pitch_rad`, `sigma_v_px` en
-  `ExtrinsicMountConfig` o en un `GroundNoiseModel`).
+- Versión vectorizada `PinholeGeometry.ground_hits(u, v) -> GroundHit`
+  (`z_c, d_long, x_lat, ray_length, sigma_z, sigma_d, valid`; `nan` en vez de
+  excepciones) con el modelo de varianza de R2 parametrizado por
+  `GroundNoiseModel(sigma_pitch_rad, sigma_v_px)`. La propagación se hace por
+  diferencias centrales sobre la geometría exacta, así es coherente con el roll
+  y con la forma cerrada $\sigma_d \approx (d^2/h)\,\sigma_\theta$.
 - `undistort_points(uv)` en `ImageRectifier` (opción A de §3.1).
 - Roll opcional en `ExtrinsicMountConfig` (por defecto 0) y horizonte como
   recta, no como fila.
-- Mover `torch`/`torchvision` a `[project.optional-dependencies].export` (H4).
+- Mover `torch`/`torchvision` a `[project.optional-dependencies].export` (H4) y
+  `tensorrt-cu12` (fijado a 10.x), `cuda-python`, `rerun-sdk` a `runtime`
+  (R11). El núcleo instalable en CI es puro CPU.
+
+**Nota sobre el test heredado `z_cam > d_long`.** Ese invariante solo es
+cierto para la longitud del rayo. Para la profundidad óptica se cumple
+$Z_c = d_{long}\cos\theta + h\sin\theta$, que es **menor** que $d_{long}$ a
+partir de $d \gtrsim 2h/\theta$ (≈ 19 m con 10° de pitch). El test se
+sustituye por los invariantes correctos: `ray_length > d_long`,
+`ray_length ≥ z_c` y la identidad anterior.
 
 **DoD**
 - Test de valor cerrado: KITTI, `v=374` → `z_c ≈ 5.12 m`, `d_long ≈ 5.06 m`

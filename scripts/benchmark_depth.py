@@ -1,6 +1,8 @@
 """
 Resolution & Latency Benchmarking Harness for Monocular Depth Estimation.
 Audits P50, P95, and P99 latencies using CUDA events on the target GPU.
+
+Requires the ``export`` extra: ``uv pip install -e ".[export]"``.
 """
 
 from __future__ import annotations
