@@ -48,10 +48,13 @@ class ExtrinsicMountConfig:
         camera_height_m: h_cam > 0 — height of the camera optical centre
             above the ground plane in metres.
         pitch_rad: θ — positive downwards relative to the horizon.
+        roll_rad: ρ — rotation about the optical axis, positive clockwise as
+            seen from behind the camera (right side of the image dips).
     """
 
     camera_height_m: float
     pitch_rad: float
+    roll_rad: float = 0.0
 
     def __post_init__(self) -> None:
         if self.camera_height_m <= 0.0:
@@ -122,7 +125,7 @@ def load_camera_config_yaml(
     YAML schema expected::
 
         intrinsics: {fx, fy, cx, cy, width, height, distortion_coeffs (optional)}
-        extrinsics: {camera_height_m, pitch_deg}
+        extrinsics: {camera_height_m, pitch_deg, roll_deg (optional, default 0)}
 
     Raises:
         FileNotFoundError: If the YAML file does not exist.
@@ -169,6 +172,7 @@ def load_camera_config_yaml(
     extrinsics = ExtrinsicMountConfig(
         camera_height_m=float(extr_raw["camera_height_m"]),
         pitch_rad=float(np.deg2rad(float(extr_raw["pitch_deg"]))),
+        roll_rad=float(np.deg2rad(float(extr_raw.get("roll_deg", 0.0)))),
     )
     return intrinsics, extrinsics
 

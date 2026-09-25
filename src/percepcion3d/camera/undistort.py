@@ -114,3 +114,28 @@ class ImageRectifier:
             borderValue=(0, 0, 0, 0),
         )
         return result
+
+    def undistort_points(self, uv: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Map raw (distorted) pixel coordinates to the rectified image frame.
+
+        Cheap alternative to remapping a full frame when only a handful of
+        pixels (box corners, contact points) need rectified coordinates. The
+        output lives in the same frame as :meth:`rectify` and
+        ``rectified_k_matrix``.
+
+        Args:
+            uv: ``(N, 2)`` float64 array of raw ``(u, v)`` pixel coordinates.
+
+        Returns:
+            ``(N, 2)`` float64 array of rectified pixel coordinates.
+        """
+        pts = np.ascontiguousarray(np.asarray(uv, dtype=np.float64).reshape(-1, 1, 2))
+        if pts.shape[0] == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        out: NDArray[np.float64] = cv2.undistortPoints(  # type: ignore[assignment]
+            pts,
+            self.intrinsics.k_matrix,
+            self.intrinsics.distortion_coeffs,
+            P=self.rectified_k_matrix,
+        )
+        return np.asarray(out, dtype=np.float64).reshape(-1, 2)
