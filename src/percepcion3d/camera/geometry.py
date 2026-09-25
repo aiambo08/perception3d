@@ -124,6 +124,11 @@ class PinholeGeometry:
         # (see get_horizon_v(u)).
         self._v_horizon: float = self.get_horizon_v(intrinsics.cx)
 
+    @property
+    def r_cg(self) -> NDArray[np.float64]:
+        """Camera → ground rotation (3×3 copy); ``r_cg.T`` maps ground → camera."""
+        return self._r_cg.copy()
+
     # ------------------------------------------------------------------
     # Projection / Deprojection
     # ------------------------------------------------------------------
