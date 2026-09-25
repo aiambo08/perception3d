@@ -22,11 +22,17 @@ asíncrono y `Detector` con backend inyectable, recall COCO→KITTI) y F3
 (profundidad relativa: Depth Anything V2-Small → ONNX con normalización
 ImageNet en grafo, `DepthEstimator.infer_async` → `DepthMap` fp16 con
 metadatos de frame, lazo de contención detector+depth en dos streams, sanidad
-Spearman disparidad vs 1/Z LiDAR) implementadas y testeadas en CPU/ONNX
-Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM, recall, Spearman) están
-pendientes de medirse en la GPU objetivo. El resto de módulos (`tracking/`,
-`safety/`, `runtime/pipeline.py`, fusión métrica en `depth/ground_solver.py`)
-son esqueletos pendientes de las fases F4–F7.
+Spearman disparidad vs 1/Z LiDAR) y F4 (fusión métrica CPU/NumPy: ajuste
+afín robusto $(s,t)$ disparidad↔$1/Z_c$ sobre la calzada con Kalman y gating
+$\chi^2$, mediana/MAD con bimodalidad por caja, BLUE en profundidad inversa de
+suelo + red + altura con error de pitch correlado, pitch en línea desde
+alturas de clase, `Measurement3D` con flags y timestamps) implementadas y
+testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
+recall, Spearman) y el DoD KITTI de F4 (AbsRel por bins) están pendientes de
+medirse en la GPU objetivo; los DoD sintéticos y de coste CPU de F4 se cumplen
+en local (`scripts/eval_fusion_synthetic.py`). El resto de módulos
+(`tracking/`, `safety/`, `runtime/pipeline.py`) son esqueletos pendientes de
+las fases F5–F7.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -56,6 +62,14 @@ uv run python scripts/bench_depth.py --mode depth --frames 300           # P50/P
 uv run python scripts/bench_depth.py --mode matrix --size 924x280 --pace-hz 60 \
     --kitti-drive <2011_09_26_drive_0005_sync> --frames 150 \
     --json reports/f3_matrix.json                                        # det / depth / ambos + Spearman LiDAR
+```
+
+Fusión métrica (F4):
+
+```bash
+uv run python scripts/eval_fusion_synthetic.py --json out/f4_synth.json   # DoD sintéticos + P95 CPU (sin GPU)
+uv run python scripts/eval_fusion_kitti.py --root <kitti_tracking/training> --seq 0000 \
+    --engine models/depth_924x280_fp16.engine --json out/f4_kitti.json    # AbsRel 0–30 / 30–60 m (GPU)
 ```
 
 ## Desarrollo

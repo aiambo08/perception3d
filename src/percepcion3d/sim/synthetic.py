@@ -28,8 +28,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from percepcion3d.camera.geometry import PinholeGeometry
+from percepcion3d.depth.preprocess import DepthResize
 
 _MIN_DEPTH_M = 0.5
+#: Inverse depth painted where no ground and no object is visible ("sky"/far background).
+_BACKGROUND_DEPTH_M = 200.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,9 @@ class SyntheticObject:
     width_m: float = 1.8
     height_m: float = 1.5
     length_m: float = 4.2
+    silhouette_frac: float = 1.0
+    """Fraction of the box width the object really covers in the dense map (thin objects
+    such as pedestrians leave background inside their box)."""
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,15 @@ class SyntheticFrame:
     """(N, 2) relative velocity ``(vx, vz)`` in the ground frame (m/s)."""
     truncated: NDArray[np.bool_]
     """(N,) True when the unclipped box exceeded the image (contact row may be off-image)."""
+    gt_boxes: NDArray[np.float64]
+    """(N, 4) exact projected boxes (clipped, no noise)."""
+    gt_heights_m: NDArray[np.float64]
+    """(N,) true object heights (the fusion only knows the class prior)."""
+    silhouette_frac: NDArray[np.float64]
+    gt_z_front_m: NDArray[np.float64]
+    """(N,) optical depth of the near face's ground edge — what the box bottom row sees."""
+    inv_depth_front: NDArray[np.float64]
+    """(N,) relative inverse depth of the near face (same noise draw as ``inv_depth``)."""
 
     def __len__(self) -> int:
         return int(self.boxes.shape[0])
@@ -128,6 +143,11 @@ class SyntheticScene:
         xz_ground: list[NDArray[np.float64]] = []
         vel_ground: list[NDArray[np.float64]] = []
         truncated: list[bool] = []
+        gt_boxes: list[NDArray[np.float64]] = []
+        heights: list[float] = []
+        sil: list[float] = []
+        z_front: list[float] = []
+        inv_front: list[float] = []
 
         for obj in self.objects:
             x, z = self.ground_position(obj, t_s)
@@ -165,8 +185,10 @@ class SyntheticScene:
                 if self.noise.contact_row_px > 0
                 else v_base
             )
-            inv_depth = self.disparity_scale / base_c[2] + self.disparity_shift
-            inv_depth *= 1.0 + rng.normal(0.0, self.noise.inv_depth_rel)
+            eps = 1.0 + rng.normal(0.0, self.noise.inv_depth_rel)
+            inv_depth = (self.disparity_scale / base_c[2] + self.disparity_shift) * eps
+            front_c = r_gc @ np.array([x, h, z - 0.5 * obj.length_m], dtype=np.float64)
+            zf = max(float(front_c[2]), _MIN_DEPTH_M)
 
             boxes.append(noisy)
             rows.append(float(row))
@@ -177,6 +199,11 @@ class SyntheticScene:
             xz_ground.append(np.array([x, z], dtype=np.float64))
             vel_ground.append(self.relative_velocity(obj))
             truncated.append(bool(np.any(raw != clipped)))
+            gt_boxes.append(clipped)
+            heights.append(obj.height_m)
+            sil.append(obj.silhouette_frac)
+            z_front.append(zf)
+            inv_front.append((self.disparity_scale / zf + self.disparity_shift) * eps)
 
         n = len(boxes)
         return SyntheticFrame(
@@ -191,6 +218,11 @@ class SyntheticScene:
             gt_xz_ground=np.asarray(xz_ground, dtype=np.float64).reshape(n, 2),
             gt_vel_ground=np.asarray(vel_ground, dtype=np.float64).reshape(n, 2),
             truncated=np.asarray(truncated, dtype=np.bool_),
+            gt_boxes=np.asarray(gt_boxes, dtype=np.float64).reshape(n, 4),
+            gt_heights_m=np.asarray(heights, dtype=np.float64),
+            silhouette_frac=np.asarray(sil, dtype=np.float64),
+            gt_z_front_m=np.asarray(z_front, dtype=np.float64),
+            inv_depth_front=np.asarray(inv_front, dtype=np.float64),
         )
 
     def frames(self, n: int) -> Iterator[SyntheticFrame]:
@@ -205,6 +237,47 @@ class SyntheticScene:
         out = self.disparity_scale / hit.z_c + self.disparity_shift
         out[~hit.valid] = np.nan
         return np.asarray(out, dtype=np.float64)
+
+    def dense_inv_depth_map(
+        self,
+        frame: SyntheticFrame,
+        dst_hw: tuple[int, int] | None = None,
+        pixel_noise_rel: float = 0.0,
+    ) -> tuple[NDArray[np.float64], DepthResize]:
+        """Dense relative inverse depth as a depth network would output it, at ``dst_hw``.
+
+        Ground plane below the horizon, far background above it, then every
+        visible object painted (far to near) over the central ``silhouette_frac``
+        of its exact box with its near face's (noisy) ``inv_depth_front``; optional i.i.d.
+        multiplicative pixel noise. Returned with the :class:`DepthResize`
+        that maps frame pixels to this canvas.
+        """
+        k = self.geometry.intrinsics
+        src_h, src_w = k.height, k.width
+        dst_h, dst_w = (src_h, src_w) if dst_hw is None else (int(dst_hw[0]), int(dst_hw[1]))
+        resize = DepthResize(src_h, src_w, dst_h, dst_w)
+        cols = (np.arange(dst_w, dtype=np.float64) + 0.5) / resize.scale_x - 0.5
+        rows = (np.arange(dst_h, dtype=np.float64) + 0.5) / resize.scale_y - 0.5
+        uu, vv = np.meshgrid(cols, rows)
+        hit = self.geometry.ground_hits(uu, vv)
+        far = self.disparity_scale / _BACKGROUND_DEPTH_M + self.disparity_shift
+        out = np.where(hit.valid, self.disparity_scale / hit.z_c + self.disparity_shift, far)
+        out = np.asarray(out, dtype=np.float64)
+
+        order = np.argsort(-frame.gt_xyz_camera[:, 2]) if len(frame) else np.empty(0, np.intp)
+        for i in order:
+            x0, y0, x1, y1 = frame.gt_boxes[i]
+            half = 0.5 * frame.silhouette_frac[i] * (x1 - x0)
+            xc = 0.5 * (x0 + x1)
+            r, c = resize.frame_to_index(
+                np.array([xc - half, xc + half]), np.array([y0, y1], dtype=np.float64)
+            )
+            out[int(r[0]) : int(r[1]) + 1, int(c[0]) : int(c[1]) + 1] = frame.inv_depth_front[i]
+
+        if pixel_noise_rel > 0.0:
+            rng = np.random.default_rng([self.seed, frame.frame_id, 1])
+            out *= 1.0 + rng.normal(0.0, pixel_noise_rel, size=out.shape)
+        return out, resize
 
 
 def _cuboid_corners(
@@ -221,9 +294,9 @@ def _cuboid_corners(
 def default_highway_scene(geometry: PinholeGeometry, seed: int = 0) -> SyntheticScene:
     """A small reference scene: lead car, overtaking car, oncoming car, pedestrian on the kerb."""
     objects = [
-        SyntheticObject(1, "car", x0_m=0.0, z0_m=25.0, vz_mps=-2.0),
-        SyntheticObject(2, "car", x0_m=3.5, z0_m=8.0, vz_mps=4.0),
-        SyntheticObject(3, "car", x0_m=-3.5, z0_m=60.0, vz_mps=-25.0),
+        SyntheticObject(1, "car", x0_m=0.0, z0_m=25.0, vz_mps=-2.0, height_m=1.45),
+        SyntheticObject(2, "car", x0_m=3.5, z0_m=8.0, vz_mps=4.0, height_m=1.62),
+        SyntheticObject(3, "car", x0_m=-3.5, z0_m=60.0, vz_mps=-25.0, height_m=1.5),
         SyntheticObject(
             4,
             "pedestrian",
@@ -233,6 +306,7 @@ def default_highway_scene(geometry: PinholeGeometry, seed: int = 0) -> Synthetic
             width_m=0.6,
             height_m=1.7,
             length_m=0.6,
+            silhouette_frac=0.4,
         ),
     ]
     return SyntheticScene(geometry, objects, fps=30.0, ego_velocity_mps=(0.0, 12.0), seed=seed)
