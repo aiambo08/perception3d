@@ -68,23 +68,37 @@ sustituye por los invariantes correctos: `ray_length > d_long`,
 
 ---
 
-## F1 · Infraestructura de medición y entrada/salida
+## F1 · Infraestructura de medición y entrada/salida — ✔ implementado (CPU)
 
 **Alcance**
-- `utils/profiling.py`: `StageTimer` (CPU, `perf_counter_ns`) y `CudaStageTimer`
-  (events) con acumulación en `numpy` y reporte P50/P95/P99/max; exportación
-  a CSV/JSON; contexto `with timer.stage("detector"):`.
-- `utils/vram.py`: muestreador NVML (`nvidia-ml-py`) en hilo a 10 Hz →
-  pico de VRAM del proceso y de la GPU.
+- `utils/profiling.py`: `StageTimer` (CPU, `perf_counter_ns`, ring buffer por
+  etapa) con reporte P50/P95/P99/max, tabla, CSV/JSON y contexto
+  `with timer.stage("detector"):`. Las etapas GPU se alimentan con
+  `timer.record(name, ms)` desde CUDA events; el `CudaStageTimer` se añade en
+  F2 junto al primer motor TensorRT, cuando pueda medirse en la GPU objetivo.
+- `utils/vram.py`: `VramSampler` (hilo a 10 Hz, `sample_fn` inyectable; NVML
+  vía `nvidia-ml-py` en el extra `runtime`) → pico de VRAM del proceso y de la GPU.
 - `runtime/buffer.py`: `LatestFrameSlot` (un único slot, *latest-wins*,
   contador de frames descartados) y `FrameStamped(frame_id, t_capture_ns, img)`.
+  `runtime/playback.py`: `play_into_slot` (reproducción a ritmo fijo con
+  P50/P95/P99 de periodo y jitter).
 - `io/sources.py`: `FrameSource` (protocolo) con `VideoFileSource`,
-  `KittiSequenceSource` (imágenes + timestamps + calib + OXTS), `V4L2Source`.
-- `sim/synthetic.py`: generador determinista de trayectorias 3D con ruido
-  configurable → proyección a cajas + disparidad sintética; base para tests
-  de F4–F6 en CI.
-- `eval/kitti.py`: carga de GT de profundidad (LiDAR proyectado en cajas) y
-  tracking; métricas AbsRel/RMSE por bin de distancia.
+  `ImageSequenceSource`, `KittiSequenceSource` (imágenes + timestamps ns +
+  calib + OXTS) y `V4L2Source` (MJPG, `CAP_PROP_BUFFERSIZE=1`).
+- `sim/synthetic.py`: `SyntheticScene` determinista (`(seed, k)`): cuboides
+  a velocidad constante + ego-velocidad → cajas con ruido, fila de contacto,
+  inversa de profundidad *afín* (escala/desplazamiento desconocidos) y GT
+  3D/velocidad; `ground_inv_depth_map()` denso del suelo. Base de F3–F6.
+- `eval/kitti.py`: GT por objeto desde las etiquetas de *tracking* de KITTI
+  (`location.z` = profundidad óptica del centro de la caja 3D, sin proyectar
+  LiDAR) + `depth_metrics_by_bin` (AbsRel/RMSE/sesgo por bin de distancia).
+- `scripts/profile_stage.py --stage {rectify,ground_hits,playback}`
+  (`--kitti`, `--video`, `--hz`, `--vram`, `--json/--csv`).
+
+**Medido (CPU de desarrollo, KITTI 1242×375, sin GPU):** `rectify` P50 0.37 ms
+/ P99 0.71 ms; `ground_hits` con 20 000 píxeles P50 1.97 ms / P99 2.66 ms;
+reproducción a 60 Hz: 60.5 Hz logrados, jitter P99 0.01 ms (sleep + spin de
+1.5 ms). Cifras orientativas: la máquina objetivo se mide en F2.
 
 **DoD**
 - Reproducir una secuencia KITTI a ≥ 60 Hz (fuente + `LatestFrameSlot`)

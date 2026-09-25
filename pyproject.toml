@@ -19,6 +19,7 @@ runtime = [
     "tensorrt-cu12>=10.3.0,<11",
     "cuda-python>=12.4.0",
     "rerun-sdk>=0.18.0",
+    "nvidia-ml-py>=12.560.30",
 ]
 # ONNX export and exploratory benchmarking only; never imported by the runtime.
 export = [

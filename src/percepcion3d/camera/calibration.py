@@ -90,7 +90,10 @@ def parse_kitti_calib_txt(
             if not line or ":" not in line:
                 continue
             key, values = line.split(":", 1)
-            data[key.strip()] = np.fromstring(values.strip(), sep=" ", dtype=np.float64)
+            try:
+                data[key.strip()] = np.array(values.split(), dtype=np.float64)
+            except ValueError:
+                continue  # non-numeric entries such as ``calib_time``
 
     size_key = f"S_rect_0{cam_idx}"
     width, height = 1242, 375
