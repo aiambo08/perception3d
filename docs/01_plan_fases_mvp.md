@@ -109,7 +109,7 @@ reproducción a 60 Hz: 60.5 Hz logrados, jitter P99 0.01 ms (sleep + spin de
 
 ---
 
-## F2 · Detector 2D en TensorRT
+## F2 · Detector 2D en TensorRT — ✔ implementado (CPU/ONNX); métricas GPU pendientes
 
 **Alcance**
 - `scripts/export_detector.py` (grupo `export`): YOLO(n|s) → ONNX con
@@ -122,13 +122,51 @@ reproducción a 60 Hz: 60.5 Hz logrados, jitter P99 0.01 ms (sleep + spin de
   frame de entrada**, incluyendo la inversa del letterbox.
 - Bench `scripts/bench_detector.py`: {aislado} con P50/P95/P99 + VRAM.
 
+**Cómo quedó**
+- `detection/letterbox.py`: `Letterboxer` con lienzo `uint8` preasignado
+  (relleno 114, centrado, `INTER_AREA` al reducir) y `LetterboxParams`
+  con `to_net`/`to_frame`/`clip_to_frame`; la inversa es exacta porque guarda
+  las dimensiones redimensionadas reales (escala X e Y independientes).
+- `detection/onnx_surgery.py`: `prepend_uint8_preprocess` (entrada
+  `images_u8` uint8 `[1,H,W,3]` → Cast → Transpose → Gather BGR→RGB → ×1/255)
+  y `append_efficient_nms` (`Transpose` + `Split` → `EfficientNMS_TRT`,
+  `box_coding=1`, salidas `num_dets/det_boxes/det_scores/det_classes` de forma
+  estática). Ambas verificadas con onnxruntime sobre grafos sintéticos.
+- `detection/detector_trt.py`: `Detector(engine: EngineBackend)` con backend
+  inyectable (protocolo `EngineBackend`/`InferenceHandle`), de modo que la
+  lógica de coordenadas, filtros y temporización se testea en CPU con un motor
+  falso. `TrtEngine` importa TensorRT/cuda-python de forma perezosa, usa
+  `set_tensor_address` + `execute_async_v3`, host *pinned*, eventos CUDA para
+  `gpu_ms` y para `wait()` (sin `cudaDeviceSynchronize`), stream de alta
+  prioridad y CUDA Graph opcionales.
+- `detection/config.py` + `configs/models.yaml`: pesos, `input_hw`, NMS,
+  clases a conservar, mapeo COCO→KITTI y umbrales DoD en un solo sitio.
+- `eval/detection.py`: IoU, *matching* codicioso por score y `recall_by_type`
+  (COCO→KITTI, GT < 25 px ignorado).
+- `scripts/export_trt.sh` (`trtexec`, FP16/INT8) y `scripts/bench_detector.py`
+  (P50/P95/P99 de `det.gpu`, `det.postprocess`, `detector_e2e`; VRAM NVML
+  baseline/carga/pico; recall opcional con etiquetas KITTI; JSON/CSV).
+
 **DoD**
 - P95 ≤ 6 ms aislado en la GPU objetivo (FP16, YOLO-n, 1024×320) **[medir]**;
   si no, documentar y elegir resolución/variante.
 - Recall ≥ 0.85 (IoU 0.5) para `Car` y ≥ 0.6 para `Pedestrian` en 200 frames
-  KITTI etiquetados (validación de exportación, no del modelo).
-- VRAM del proceso (NVML) ≤ 900 MB con contexto incluido.
-- Test CPU: la inversa del letterbox es exacta (round-trip de cajas).
+  KITTI etiquetados (validación de exportación, no del modelo) **[medir]**.
+- VRAM del proceso (NVML) ≤ 900 MB con contexto incluido **[medir]**.
+- Test CPU: la inversa del letterbox es exacta (round-trip de cajas). ✔
+
+Los tres puntos **[medir]** requieren la GPU objetivo; el entorno de
+desarrollo de esta fase no dispone de driver CUDA, así que `TrtEngine` está
+escrito contra la API de TensorRT 10 / cuda-python 12 pero **no ejecutado**.
+Primera cosa que hacer en la máquina objetivo:
+
+```bash
+uv pip install -e ".[export]" && uv run python scripts/export_detector.py
+uv pip install -e ".[runtime]" && bash scripts/export_trt.sh \
+    models/detector_1024x320.onnx models/detector_1024x320_fp16.engine fp16
+uv run python scripts/bench_detector.py --kitti <image_02/0000> \
+    --labels <label_02/0000.txt> --frames 200 --json reports/f2_detector.json
+```
 
 ---
 
