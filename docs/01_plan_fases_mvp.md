@@ -241,33 +241,99 @@ ViT degrada el orden relativo).
 
 ---
 
-## F4 · Fusión métrica y restricción del suelo
+## F4 · Fusión métrica y restricción del suelo — ✔ implementado (CPU/NumPy)
 
-**Alcance** (todo CPU/NumPy, testeable sin GPU)
+**Alcance implementado**
 - `depth/ground_solver.py`:
-  - `RoadMask`: píxeles bajo el horizonte ∧ fuera de cajas ∧ banda central.
-  - `AffineScaleSolver`: Theil–Sen/RANSAC de $\hat d$ vs $1/Z_c$ en
-    ~2 000 píxeles → $(s,t)$, nº inliers, covarianza; filtro temporal con
-    gating $\chi^2$.
-  - `PlaneFitter`: plano a los puntos deproyectados de calzada → pitch/roll en
-    línea (invariante a escala) → actualiza `ExtrinsicMountConfig` efectivo
-    y $\sigma_\theta$.
-- `depth/sampling.py`: ROI interior, mediana/MAD, detección de bimodalidad
-  (modo de mayor disparidad para clases delgadas), σ de la mediana.
-- `depth/fusion.py`: estimadores $Z_g, Z_n, Z_h$ con gates (truncado,
-  ocluido, clase sin contacto, $d > d_{max}$) → fusión por varianza inversa
-  con test de consistencia → `Measurement3D(X, Z, sigma_X, sigma_Z, flags,
-  t_capture_ns)`.
-- Config `configs/fusion.yaml`: alturas por clase y σ, $\sigma_\theta$,
-  $\sigma_v$, k de la red, umbrales de gates.
+  - `GroundGrid`/`GroundGridCache`: $1/Z_c$, $\partial Z/\partial v$,
+    $\partial Z/\partial\theta$ y rayos a **resolución de red**, cacheados por
+    (resize, intrínsecos) y por (resize, $h$, pitch cuantizado a 0.1°, roll);
+    construcción separable (filas × columnas), ~0.9 ms a 462×140 y ~3.7 ms a
+    924×280 en la CPU de desarrollo — de ahí la cuantización del pitch.
+  - `sample_road`: máscara estática (bajo horizonte, banda central, $Z_c$
+    dentro de rango) ∧ fuera de las cajas rasterizadas; ≤ 2 000 píxeles.
+  - `robust_affine_fit`: mediana de pendientes de pares aleatorios →
+    mínimos cuadrados con inliers (3σ MAD) → $(s,t)$, covarianza 2×2,
+    ratio de inliers; rechaza $s \le 0$ y rangos degenerados.
+  - `AffineKalman`: paseo aleatorio 2D con gating $\chi^2_{2}$ (99 %) y
+    reinicio tras $n$ rechazos consecutivos (cambio de escena/modelo).
+  - `PitchEstimator`: pitch en línea a partir de objetos con altura conocida
+    (`pitch_from_contact` resuelve $Z_c(v_b;\theta)=f_yH/h_{px}$ por
+    detección; mediana robusta → Kalman 1D con paso máximo).
+  - `fit_plane`: plano PCA a la calzada deproyectada → pitch/roll/altura;
+    se mantiene como diagnóstico, **no** como corrector (ver hallazgo).
+- `depth/sampling.py`: ROI interior (`shrink`), submuestreo espacial regular
+  para acotar el coste por `max_pixels`, mediana/MAD, σ de la mediana
+  ($1.2533\,\sigma/\sqrt{n}$), bimodalidad por Otsu 1D (clases delgadas →
+  modo cercano), exclusión dilatada de cajas oclusoras;
+  `disparity_to_depth_batch` con método delta sobre $(\hat d, s, t)$.
+- `depth/fusion.py`: cues $\rho_g, \rho_n, \rho_h$ en **profundidad inversa**
+  con gates (contacto truncado/sobre horizonte, sin prior, sin mapa, caja
+  fuera del alcance del ajuste, altura < 12 px, fuera de $[1, 80]$ m), BLUE
+  bajo $\Sigma = D + cc^\top$ con $c_i = (\partial\rho_i/\partial\theta)\sigma_\theta$
+  (el prior de altura tiene $c_h = 0$), test $\chi^2$ de consistencia que
+  infla la varianza y marca `INCONSISTENT`, `Measurement3D` (metros, σ,
+  cues individuales, pesos, flags, `frame_id`, `t_capture_ns`,
+  `center_offset_m`), `MetricFusionStage.process()` (último mapa disponible +
+  `depth_lag_frames`).
+- `configs/fusion.yaml`: alturas/longitudes por clase con alias COCO↔KITTI,
+  ruidos, gates y muestreo.
+- Evaluación: `eval/fusion_synthetic.py` + `scripts/eval_fusion_synthetic.py`
+  (escena sintética densa de F1 ampliada con mapas $\hat d$ pintados por
+  objeto, varias semillas); `eval/fusion_kitti.py` +
+  `scripts/eval_fusion_kitti.py` (KITTI tracking: cara cercana y centro vs
+  etiquetas 3D, `gt`/`detector`, mapas desde engine TensorRT, `.npy`
+  precomputados o sin red).
 
-**DoD**
-- Sintético: con ruido nominal, error de $\hat Z$ ≤ el mejor estimador
-  individual en el 95 % de las muestras; con pitch perturbado 1°, la fusión
-  degrada < 30 % mientras $Z_g$ solo degrada > 100 %.
-- KITTI (mediciones grabadas de F2/F3): AbsRel ≤ 10 % en 0–30 m para `Car`
-  con caja no truncada; ≤ 20 % en 30–60 m **[medir]**.
-- Coste CPU total por frame (solver + muestreo de 20 cajas) P95 ≤ 2 ms.
+**Hallazgo: el pitch no es observable desde la calzada.** Con roll 0,
+$1/Z_c(v) = (\sin\theta + y\cos\theta)/h$ es *exactamente* afín en la fila;
+si el pitch asumido es $\theta'$, $\hat d$ sigue siendo exactamente afín en
+$1/Z_c(\theta')$: el ajuste queda perfecto y $(s,t)$ absorben el error (sobre
+todo $t$). Deproyectar la calzada con ese $(s,t)$ y ajustar un plano devuelve
+$\theta'$, no el pitch real (`test_pitch_is_unobservable_from_road_plus_affine_map`).
+El `PlaneFitter` del plan original no puede corregir el pitch; sí lo puede una
+segunda cue **métrica**: objetos de altura conocida (implementado) o un
+modelo métrico con $t \equiv 0$. Consecuencia para la fusión: $\rho_g$ y
+$\rho_n$ comparten el error de pitch (por eso la covarianza correlada), y el
+prior de altura es lo que rescata el campo lejano cuando el pitch está mal.
+
+**Por qué fusionar en $\rho = 1/Z$.** $\rho_g$ es lineal en la fila con
+sensibilidad $\partial\rho_g/\partial\theta \approx 1/h$ independiente del
+alcance; $\rho_n$ es afín en la salida de la red por construcción; $\rho_h
+\propto h_{px}$. En $Z$ los mismos errores son de cola pesada hacia lejos
+($Z=1/\rho$ explota al acercarse al horizonte) y un BLUE gaussiano en $Z$
+infrapondera justo las muestras lejanas malas del suelo. Salida en metros:
+$Z=1/\hat\rho$, $\sigma_Z=\sigma_\rho/\hat\rho^2$.
+
+**Convenciones.** $Z$ de `Measurement3D` es la profundidad óptica del
+**contacto más cercano** (lo que ve la fila inferior de la caja);
+`center_offset_m` (media longitud de la clase) pasa al centro del objeto que
+usan las etiquetas KITTI y el tracker. En la evaluación KITTI la referencia
+primaria es la cara cercana, $z - \tfrac12(l|\sin r_y| + w|\cos r_y|)$.
+
+**DoD (medido en CPU, sintético, `scripts/eval_fusion_synthetic.py`)**
+- Nominal: P95 fusionado 18.2 % ≤ mejor cue individual 22.6 % (altura);
+  P50 5.1 % vs 5.9 % (red) / 6.2 % (altura) / 8.3 % (suelo). ✔
+- Pitch perturbado 1°: con pitch en línea la mediana fusionada degrada 0.1 %
+  (< 30 %); sin corrección, $Z_g$ degrada 123 % (> 100 %) y la fusión 84 %. ✔
+- Coste CPU solver + muestreo, 20 cajas, mapa 924×280 (tamaño de F3): P95 **1.93 ms** en
+  régimen estacionario (grid cacheado) ≤ 2 ms ✔; **3.02 ms** contando los
+  frames que reconstruyen el grid por cambio de pitch cuantizado. Medido en
+  la CPU de desarrollo, no en el portátil objetivo. Los tiempos **excluyen**
+  la generación del mapa sintético.
+- KITTI: AbsRel ≤ 10 % en 0–30 m y ≤ 20 % en 30–60 m para `Car` no truncado
+  **[medir]** — requiere el engine de profundidad de F3 en la GPU objetivo
+  (`scripts/eval_fusion_kitti.py --engine …`) o mapas `.npy` volcados desde
+  ella. El harness está testeado con una secuencia sintética en formato
+  KITTI tracking, lo que valida el cableado, no el DoD.
+
+```bash
+uv run python scripts/eval_fusion_synthetic.py --json out/f4_synth.json
+# GPU objetivo (KITTI tracking training/):
+uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000 \
+    --engine models/depth_924x280_fp16.engine --json out/f4_kitti_0000.json
+uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # sin red: suelo + altura
+```
 
 ---
 

@@ -42,3 +42,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+# Salidas de benchmarks/evaluaciones
+out/
+reports/
