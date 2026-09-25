@@ -145,6 +145,9 @@ class _FakeHandle:
         self.waited += 1
         return self._outputs
 
+    def ready(self) -> bool:
+        return True
+
     @property
     def gpu_ms(self) -> float | None:
         return self._gpu_ms

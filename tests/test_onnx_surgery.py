@@ -15,12 +15,15 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper, numpy_helper  # noqa: E402
 
 from percepcion3d.detection.onnx_surgery import (  # noqa: E402
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     NMS_OUTPUT_NAMES,
     U8_INPUT_NAME,
     NmsConfig,
     append_efficient_nms,
     head_layout,
     input_hw,
+    output_dims,
     prepend_uint8_preprocess,
 )
 
@@ -102,6 +105,35 @@ def test_preprocess_rejects_dynamic_or_non_float_inputs() -> None:
     gray.graph.input[0].type.tensor_type.shape.dim[1].dim_value = 1
     with pytest.raises(ValueError, match="3 input channels"):
         prepend_uint8_preprocess(gray)
+
+
+def test_preprocess_with_imagenet_mean_std_matches_torchvision_style_reference() -> None:
+    """Depth Anything path: (x/255 - mean) / std per RGB channel, folded into Mul+Add."""
+    model = prepend_uint8_preprocess(_identity_model(), mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    onnx.checker.check_model(model, full_check=True)
+    assert input_hw(model) == (H, W)
+    assert output_dims(model) == ("output0", [1, 3, H, W])
+
+    rng = np.random.default_rng(3)
+    bgr = rng.integers(0, 256, size=(1, H, W, 3), dtype=np.uint8)
+    (out,) = _run(model, {U8_INPUT_NAME: bgr})
+    rgb = bgr[..., ::-1].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+    mean = np.asarray(IMAGENET_MEAN, np.float32).reshape(1, 3, 1, 1)
+    std = np.asarray(IMAGENET_STD, np.float32).reshape(1, 3, 1, 1)
+    np.testing.assert_allclose(out, (rgb - mean) / std, rtol=1e-5, atol=1e-5)
+    # channel order matters: swapping the constants must change the result
+    swapped = prepend_uint8_preprocess(
+        _identity_model(), mean=IMAGENET_MEAN[::-1], std=IMAGENET_STD[::-1]
+    )
+    (out_sw,) = _run(swapped, {U8_INPUT_NAME: bgr})
+    assert not np.allclose(out, out_sw)
+
+
+def test_preprocess_mean_std_validation() -> None:
+    with pytest.raises(ValueError, match="together"):
+        prepend_uint8_preprocess(_identity_model(), mean=IMAGENET_MEAN)
+    with pytest.raises(ValueError, match="std"):
+        prepend_uint8_preprocess(_identity_model(), mean=IMAGENET_MEAN, std=(0.0, 1.0, 1.0))
 
 
 @pytest.mark.parametrize("opset", [11, 17])

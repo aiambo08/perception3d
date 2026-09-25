@@ -17,7 +17,7 @@
 | `camera/geometry.py` | Implementado | Proyección/deproyección, horizonte, distancias al suelo. **Ver hallazgo H1.** |
 | `camera/undistort.py` | Implementado | LUT `CV_32FC1` precomputada, `cv2.remap` en CPU. |
 | `tests/test_geometry.py` | 22 tests verdes | Reversibilidad, monotonía, gating de horizonte. |
-| `scripts/benchmark_depth.py` | Implementado | Proxy EfficientNet-B3 con CUDA events. **Ver hallazgo H2.** |
+| `scripts/benchmark_depth.py` | Implementado | Proxy EfficientNet-B3 con CUDA events. **Ver hallazgo H2.** (Sustituido en F3 por `scripts/bench_depth.py` sobre el engine real.) |
 | `detection/`, `depth/`, `tracking/`, `safety/`, `runtime/`, `utils/` | Ficheros vacíos | Solo esqueleto. |
 | `configs/models.yaml`, `README.md` | Vacíos | |
 
@@ -62,6 +62,8 @@ percentiles obtenidos no son transferibles: el benchmark real debe ejecutar el
 **engine TensorRT del modelo candidato**, no un proxy PyTorch. Además,
 `torch.cuda.max_memory_allocated` solo ve el allocator de PyTorch; el pico real
 de VRAM (contexto CUDA, workspace TRT, cuDNN) hay que leerlo con NVML.
+→ Resuelto en F3: `scripts/bench_depth.py` mide el engine TensorRT de Depth
+Anything V2-Small (CUDA events + NVML) y la matriz detector+depth.
 
 **H3 — `ImageRectifier` está pensado para trabajar a resolución de sensor en CPU.**
 Correcto para KITTI (1242×375, ya rectificado → coeficientes cero) pero a 1080p

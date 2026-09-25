@@ -1,11 +1,14 @@
-"""ONNX graph surgery for the detector export (requires the ``export`` extra).
+"""ONNX graph surgery for the detector/depth exports (requires the ``export`` extra).
 
-Two independent transformations on a YOLOv8/YOLO11-style ONNX graph:
+Two independent transformations on a single-input/single-output ONNX graph:
 
 1. :func:`prepend_uint8_preprocess` — replace the ``float32 [1,3,H,W]`` input
    by ``uint8 [1,H,W,3]`` (BGR, as delivered by OpenCV / V4L2) and put
    ``Cast → Transpose(NHWC→NCHW) → channel reverse (BGR→RGB) → /255`` inside
-   the graph. The host uploads 1 byte/pixel and does no ``astype``/``transpose``.
+   the graph, optionally followed by per-channel ``(x - mean) / std`` (folded
+   into one ``Mul`` + one ``Add``, as needed by ImageNet-normalised backbones
+   such as Depth Anything). The host uploads 1 byte/pixel and does no
+   ``astype``/``transpose``.
 
 2. :func:`append_efficient_nms` — replace the raw head output
    ``output0 [1, 4+C, N]`` (cx, cy, w, h, class scores) by the TensorRT
@@ -76,13 +79,25 @@ def _default_opset(model: onnx.ModelProto) -> int:
     return 0
 
 
+IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
+IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+
+
 def prepend_uint8_preprocess(
     model: onnx.ModelProto,
     input_name: str = U8_INPUT_NAME,
     bgr_to_rgb: bool = True,
     scale: float = 1.0 / 255.0,
+    mean: tuple[float, float, float] | None = None,
+    std: tuple[float, float, float] | None = None,
 ) -> onnx.ModelProto:
-    """Return a copy of ``model`` whose input is ``uint8 [N,H,W,3]`` (NHWC)."""
+    """Return a copy of ``model`` whose input is ``uint8 [N,H,W,3]`` (NHWC).
+
+    With ``mean``/``std`` (RGB order, in ``[0,1]`` units) the graph computes
+    ``(x·scale − mean) / std`` as ``x·(scale/std) + (−mean/std)`` per channel.
+    """
+    if (mean is None) != (std is None):
+        raise ValueError("mean and std must be given together")
     model = onnx.ModelProto.FromString(model.SerializeToString())
     g = model.graph
     old_in, _ = _single_io(model)
@@ -108,8 +123,27 @@ def prepend_uint8_preprocess(
             helper.make_node("Gather", [last, "pre/rgb_idx"], ["pre/rgb"], axis=1, name="pre/rgb")
         )
         last = "pre/rgb"
-    g.initializer.append(numpy_helper.from_array(np.array(scale, dtype=np.float32), "pre/scale"))
-    nodes.append(helper.make_node("Mul", [last, "pre/scale"], [old_in.name], name="pre/scale_mul"))
+    if mean is None or std is None:
+        g.initializer.append(
+            numpy_helper.from_array(np.array(scale, dtype=np.float32), "pre/scale")
+        )
+        nodes.append(
+            helper.make_node("Mul", [last, "pre/scale"], [old_in.name], name="pre/scale_mul")
+        )
+    else:
+        std_arr = np.asarray(std, dtype=np.float64)
+        if std_arr.shape != (3,) or np.any(std_arr <= 0):
+            raise ValueError(f"std must be 3 positive values, got {std}")
+        mul = (scale / std_arr).astype(np.float32).reshape(1, 3, 1, 1)
+        add = (-np.asarray(mean, dtype=np.float64) / std_arr).astype(np.float32).reshape(1, 3, 1, 1)
+        g.initializer.append(numpy_helper.from_array(mul, "pre/scale"))
+        g.initializer.append(numpy_helper.from_array(add, "pre/bias"))
+        nodes.append(
+            helper.make_node("Mul", [last, "pre/scale"], ["pre/scaled"], name="pre/scale_mul")
+        )
+        nodes.append(
+            helper.make_node("Add", ["pre/scaled", "pre/bias"], [old_in.name], name="pre/bias_add")
+        )
 
     g.input.remove(old_in)
     g.input.insert(0, new_in)
@@ -209,6 +243,12 @@ def head_layout(model: onnx.ModelProto) -> tuple[int, int, int]:
     _, out = _single_io(model)
     b, ch, n = _static_dims(out)
     return b, ch, n
+
+
+def output_dims(model: onnx.ModelProto) -> tuple[str, list[int]]:
+    """``(name, static dims)`` of the single graph output."""
+    _, out = _single_io(model)
+    return out.name, _static_dims(out)
 
 
 def input_hw(model: onnx.ModelProto) -> tuple[int, int]:
