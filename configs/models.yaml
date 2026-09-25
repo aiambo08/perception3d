@@ -36,9 +36,33 @@ detector:
     Pedestrian: [person]
     Cyclist: [bicycle, motorcycle, person]
 
-# Definition of Done for F2 (measured on the target GPU, FP16, YOLO-n 1024x320).
+depth:
+  # Hugging Face id (transformers, `export` extra). Relative: affine-invariant
+  # inverse depth. Metric outdoor variant: depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf
+  weights: depth-anything/Depth-Anything-V2-Small-hf
+  variant: relative        # relative | metric_outdoor | metric_indoor
+  # Candidate engine sizes (H, W), multiples of 14 (ViT patch), ~KITTI 3.3:1 aspect.
+  # Tokens: 280x924 -> 1320 (= 518x518's 1369), 252x840 -> 1080, 322x1064 -> 1748.
+  # The first entry is the default; bench_depth.py measures all of them.
+  input_sizes: [[280, 924], [252, 840], [322, 1064]]
+  onnx: models/depth_{w}x{h}.onnx
+  engine: models/depth_{w}x{h}_fp16.engine
+  precision: fp16
+  # ImageNet normalisation folded into the graph (RGB order).
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  store_fp16: true
+
+# Definition of Done (measured on the target GPU, FP16).
 dod:
+  # F2: YOLO-n 1024x320
   detector_p95_ms: 6.0
   detector_vram_mb: 900
   recall_car: 0.85
   recall_pedestrian: 0.60
+  # F3: Depth Anything V2-S, default size, alone / with the detector in flight
+  depth_p95_ms: 25.0
+  detector_p99_contended_ms: 8.0
+  total_vram_mb: 2000
+  depth_spearman_road: 0.95

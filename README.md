@@ -18,11 +18,15 @@ modelo de varianza, calibración, rectificación) y F1 (medición P50/P95/P99 y
 VRAM, `LatestFrameSlot`, fuentes KITTI/vídeo/V4L2, escena sintética, GT y
 métricas KITTI) y F2 (detector 2D: letterbox rectangular con inversa exacta,
 cirugía ONNX con preprocesado uint8 + `EfficientNMS_TRT`, `TrtEngine`
-asíncrono y `Detector` con backend inyectable, recall COCO→KITTI) implementadas
-y testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 (P95, VRAM, recall)
-están pendientes de medirse en la GPU objetivo. El resto de módulos (`depth/`,
-`tracking/`, `safety/`, `runtime/pipeline.py`) son esqueletos pendientes de
-las fases F3–F7.
+asíncrono y `Detector` con backend inyectable, recall COCO→KITTI) y F3
+(profundidad relativa: Depth Anything V2-Small → ONNX con normalización
+ImageNet en grafo, `DepthEstimator.infer_async` → `DepthMap` fp16 con
+metadatos de frame, lazo de contención detector+depth en dos streams, sanidad
+Spearman disparidad vs 1/Z LiDAR) implementadas y testeadas en CPU/ONNX
+Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM, recall, Spearman) están
+pendientes de medirse en la GPU objetivo. El resto de módulos (`tracking/`,
+`safety/`, `runtime/pipeline.py`, fusión métrica en `depth/ground_solver.py`)
+son esqueletos pendientes de las fases F4–F7.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -41,6 +45,19 @@ uv run python scripts/bench_detector.py --kitti <image_02/0000> --labels <label_
     --frames 200 --json reports/f2_detector.json                        # P50/P95/P99 + VRAM + recall
 ```
 
+Profundidad (F3), en la máquina con GPU:
+
+```bash
+uv run python scripts/export_depth.py --config configs/models.yaml       # HF → ONNX (uint8 + ImageNet) ×3 tamaños
+for s in 924x280 840x252 1064x322; do
+  bash scripts/export_trt.sh models/depth_$s.onnx models/depth_${s}_fp16.engine fp16
+done
+uv run python scripts/bench_depth.py --mode depth --frames 300           # P50/P95/P99 + VRAM por tamaño
+uv run python scripts/bench_depth.py --mode matrix --size 924x280 --pace-hz 60 \
+    --kitti-drive <2011_09_26_drive_0005_sync> --frames 150 \
+    --json reports/f3_matrix.json                                        # det / depth / ambos + Spearman LiDAR
+```
+
 ## Desarrollo
 
 ```bash
@@ -56,5 +73,5 @@ Grupos opcionales (`pyproject.toml`):
 |---|---|---|
 | *(núcleo)* | numpy, opencv-headless, pyyaml, scipy | siempre; CI |
 | `runtime` | tensorrt-cu12 10.x, cuda-python, rerun-sdk, nvidia-ml-py | inferencia y VRAM en la GPU objetivo |
-| `export` | torch, torchvision, ultralytics, onnx | exportar ONNX y `scripts/benchmark_depth.py` |
+| `export` | torch, torchvision, ultralytics, transformers, onnx | exportar ONNX (detector y depth) |
 | `dev` | pytest, ruff, mypy, onnx, onnxruntime | desarrollo y CI (tests de cirugía ONNX en CPU) |

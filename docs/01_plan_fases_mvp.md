@@ -170,24 +170,74 @@ uv run python scripts/bench_detector.py --kitti <image_02/0000> \
 
 ---
 
-## F3 · Profundidad relativa en TensorRT
+## F3 · Profundidad relativa en TensorRT — implementado (GPU pendiente)
 
-**Alcance**
-- `scripts/export_depth.py`: Depth Anything V2-Small (relativa) y su variante
-  métrica outdoor → ONNX (preprocesado en grafo) → `.engine` FP16 para 2–3
-  tamaños de entrada de aspecto ancho (múltiplos de 14).
-- `depth/depth_trt.py`: `DepthEstimator.infer_async(frame, stream) ->
-  DepthHandle` → `DepthMap(frame_id, t_capture_ns, disparity: float16[h,w],
-  scale_to_frame)`.
-- Reemplazar el proxy de `scripts/benchmark_depth.py` por el engine real (H2);
-  matriz {depth solo, depth + detector} (R3).
+**Alcance** (implementado, PR F3)
+- `scripts/export_depth.py`: `depth-anything/Depth-Anything-V2-Small-hf`
+  (transformers; extra `export`) → ONNX estático `pixel_values [1,3,H,W]` →
+  cirugía `prepend_uint8_preprocess(mean, std)`: entrada `images_u8 [1,H,W,3]`
+  BGR, swap RGB, `/255` y normalización ImageNet plegadas en `Mul+Add`. Un
+  ONNX por tamaño de `depth.input_sizes` (ancho, múltiplo de 14: 280×924 por
+  defecto ≈ 1 320 tokens, 252×840, 322×1064). La variante métrica outdoor
+  (`variant: metric_outdoor`, `max_depth: 80` en el checkpoint) usa el mismo
+  camino con `kind="metric_depth"`.
+- `runtime/trt_engine.py`: `TrtEngine`/`EngineBackend`/`InferenceHandle`
+  extraídos del detector y compartidos; `InferenceHandle.ready()`
+  (`cudaEventQuery`) permite sondear sin bloquear.
+- `depth/preprocess.py`: `DepthResizer` (stretch a resolución de red en un
+  canvas uint8 preasignado, sin letterbox: el padding introduciría tokens
+  artificiales en la atención global) + `DepthResize` (mapeo exacto
+  frame↔red, `frame_to_index`).
+- `depth/depth_trt.py`: `DepthEstimator.infer_async(frame, frame_id,
+  t_capture_ns) -> DepthHandle` → `DepthMap(frame_id, t_capture_ns,
+  values: float16[h,w], kind, resize, gpu_ms)` con `sample(u,v)`,
+  `inverse_depth()` y `to_frame_resolution()`. La salida relativa se llama
+  `disparity` y nunca se interpreta como distancia: $\hat d = s\,/Z + t$ con
+  $(s,t)$ desconocidos por frame (los resuelve F4).
+- `runtime/contention.py`: lazo R3 con dos engines — depth encolado **antes**
+  que el detector (peor caso para su cola), `wait()` solo del detector,
+  `ready()` para recoger el mapa cuando termina; registra `det_e2e`,
+  `depth_e2e`, mapas producidos, slots saltados y retraso en frames.
+- `eval/lidar.py` + `eval/depth_sanity.py`: proyección Velodyne→imagen
+  (KITTI raw y tracking), retorno más cercano por píxel, máscara de calzada
+  (bajo horizonte ∧ fuera de cajas), Spearman $\rho$ disparidad vs $1/Z$ y
+  AbsRel tras ajuste afín Theil–Sen.
+- `scripts/bench_depth.py`: `--mode depth` (todos los tamaños) y
+  `--mode matrix` ({detector, depth, ambos}); P50/P95/P99 de `depth.gpu`,
+  `depth_e2e`, `det.gpu` bajo contención; VRAM NVML; `--kitti-drive` añade la
+  sanidad LiDAR; informe DoD y JSON. Sustituye al proxy EfficientNet-B3 (H2).
 
 **DoD**
-- P95 ≤ 25 ms aislado para el tamaño elegido; P99 del **detector** bajo
-  contención ≤ 8 ms **[medir]**.
-- VRAM total (ambos engines, NVML) ≤ 2.0 GB.
+- P95 ≤ 25 ms aislado para el tamaño elegido **[medir]**; P99 del
+  **detector** bajo contención ≤ 8 ms **[medir]**.
+- VRAM total (ambos engines, NVML) ≤ 2.0 GB **[medir]**.
 - Correlación de Spearman ≥ 0.95 entre disparidad predicha y 1/Z LiDAR en
-  píxeles de calzada (sanidad de la exportación FP16; `polygraphy` si falla).
+  píxeles de calzada **[medir]**. Valida orden relativo, canal BGR/RGB,
+  normalización, resize y construcción FP16 — **no** la escala métrica.
+  Si falla: `polygraphy run --trt --onnxrt` sobre el ONNX.
+- Tests CPU: mapeo frame↔red y `sample()` exactos, `DepthEstimator` con
+  engine simulado (fp16, metadatos, `[1,H,W]` y `[1,1,H,W]`), cirugía
+  mean/std en ONNX Runtime, proyección LiDAR sintética con $\rho \approx 1$,
+  lazo de contención con engines simulados. ✔
+
+Sin driver CUDA en el entorno de desarrollo; primera cosa en la GPU objetivo:
+
+```bash
+uv pip install -e ".[export]" && uv run python scripts/export_depth.py
+uv pip install -e ".[runtime]"
+for s in 924x280 840x252 1064x322; do
+  bash scripts/export_trt.sh models/depth_$s.onnx models/depth_${s}_fp16.engine fp16
+done
+uv run python scripts/bench_depth.py --mode depth --frames 300            # elegir tamaño
+uv run python scripts/bench_depth.py --mode matrix --size 924x280 --pace-hz 60 \
+    --kitti-drive <2011_09_26_drive_0005_sync> --frames 150 --json reports/f3_matrix.json
+```
+
+Decisiones que dependen de la medida: tamaño de entrada (280×924 vs
+252×840 si P95 > 25 ms), `depth_every` (1 → 30 Hz a 60 fps del detector si
+`depth_e2e` P95 < 33 ms; 2 si no) y si hace falta INT8 para el ViT (en
+general no compensa: la atención en FP16 ya domina y la calibración INT8 de
+ViT degrada el orden relativo).
 
 ---
 
