@@ -1,0 +1,28 @@
+# Normalize line endings on checkout
+# Shell scripts must always be LF (bash/WSL2 breaks on CRLF)
+*.sh        text eol=lf
+
+# Python and YAML: normalize to LF, let git handle checkout
+*.py        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.json      text eol=lf
+*.cfg       text eol=lf
+
+# Windows-specific scripts: keep CRLF
+*.bat       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binary files: no line-ending conversion
+*.onnx      binary
+*.engine    binary
+*.pt        binary
+*.bin       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.zip       binary
+*.npy       binary
