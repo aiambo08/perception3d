@@ -32,8 +32,45 @@ class VramPeak:
     samples: int
 
 
-def nvml_sample_fn(device_index: int = 0, pid: int | None = None) -> SampleFn:
+class DeviceDeltaSampleFn:
+    """Per-process VRAM from NVML, falling back to *device used − baseline*.
+
+    Under Windows WDDM (native and WSL2) NVML reports no per-process memory
+    (``usedGpuMemory`` is ``None``). The fallback subtracts the device-wide usage
+    captured at construction, so build this **before** creating any CUDA
+    context: the estimate then includes this process's context and engines,
+    plus whatever other processes allocate meanwhile (an upper bound).
+
+    Args:
+        device_used_mb: Device-wide used memory.
+        process_used_mb: This process's memory, or ``None`` when unavailable.
+    """
+
+    def __init__(
+        self,
+        device_used_mb: Callable[[], float],
+        process_used_mb: Callable[[], float | None],
+    ) -> None:
+        self._device_used_mb = device_used_mb
+        self._process_used_mb = process_used_mb
+        self.baseline_gpu_mb = device_used_mb()
+        self.process_source = "nvml_process"
+
+    def __call__(self) -> tuple[float, float]:
+        gpu_mb = self._device_used_mb()
+        proc = self._process_used_mb()
+        if proc is not None:
+            self.process_source = "nvml_process"
+            return proc, gpu_mb
+        self.process_source = "device_delta"
+        return max(0.0, gpu_mb - self.baseline_gpu_mb), gpu_mb
+
+
+def nvml_sample_fn(device_index: int = 0, pid: int | None = None) -> DeviceDeltaSampleFn:
     """Build a sampler backed by NVML for ``device_index`` and ``pid`` (default: this process).
+
+    See :class:`DeviceDeltaSampleFn` for the fallback used when NVML has no
+    per-process accounting (WDDM); check ``.process_source`` after sampling.
 
     Raises:
         RuntimeError: if ``nvidia-ml-py`` is not installed or NVML cannot initialise
@@ -54,21 +91,20 @@ def nvml_sample_fn(device_index: int = 0, pid: int | None = None) -> SampleFn:
 
     target_pid = os.getpid() if pid is None else pid
 
-    def _sample() -> tuple[float, float]:
-        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        gpu_mb = float(mem.used) / 2**20
-        process_mb = 0.0
+    def _device() -> float:  # pragma: no cover - needs a GPU
+        return float(pynvml.nvmlDeviceGetMemoryInfo(handle).used) / 2**20
+
+    def _process() -> float | None:  # pragma: no cover - needs a GPU
         try:
             procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
         except pynvml.NVMLError:
-            procs = []
+            return None
         for p in procs:
             if p.pid == target_pid and p.usedGpuMemory is not None:
-                process_mb = float(p.usedGpuMemory) / 2**20
-                break
-        return process_mb, gpu_mb
+                return float(p.usedGpuMemory) / 2**20
+        return None
 
-    return _sample
+    return DeviceDeltaSampleFn(_device, _process)
 
 
 class VramSampler:

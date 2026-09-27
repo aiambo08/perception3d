@@ -26,13 +26,17 @@ Spearman disparidad vs 1/Z LiDAR) y F4 (fusión métrica CPU/NumPy: ajuste
 afín robusto $(s,t)$ disparidad↔$1/Z_c$ sobre la calzada con Kalman y gating
 $\chi^2$, mediana/MAD con bimodalidad por caja, BLUE en profundidad inversa de
 suelo + red + altura con error de pitch correlado, pitch en línea desde
-alturas de clase, `Measurement3D` con flags y timestamps) implementadas y
+alturas de clase, `Measurement3D` con flags y timestamps) y F5 (tracking: ByteTrack 2D, KF CV
+en $[X, Z, V_X, V_Z]$ con $\Delta t$ variable, $R_k$ desde F4 y mediciones
+retrasadas, ego-motion `Zero`/`Constant`/`Oxts`, velocidad relativa y
+etiqueta estático/móvil) implementadas y
 testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
 recall, Spearman) y el DoD KITTI de F4 (AbsRel por bins) están pendientes de
 medirse en la GPU objetivo; los DoD sintéticos y de coste CPU de F4 se cumplen
-en local (`scripts/eval_fusion_synthetic.py`). El resto de módulos
-(`tracking/`, `safety/`, `runtime/pipeline.py`) son esqueletos pendientes de
-las fases F5–F7.
+en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
+(`scripts/eval_tracking_synthetic.py`); el DoD KITTI de F5 y su coste CPU en
+el portátil están pendientes de medir. `safety/` y `runtime/pipeline.py` son
+esqueletos pendientes de F6–F7.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -47,8 +51,8 @@ uv pip install -e ".[export]"
 uv run python scripts/export_detector.py --config configs/models.yaml   # YOLO → ONNX (uint8 + NMS)
 uv pip install -e ".[runtime]"
 bash scripts/export_trt.sh models/detector_1024x320.onnx models/detector_1024x320_fp16.engine fp16
-uv run python scripts/bench_detector.py --kitti <image_02/0000> --labels <label_02/0000.txt> \
-    --frames 200 --json reports/f2_detector.json                        # P50/P95/P99 + VRAM + recall
+uv run python scripts/bench_detector.py --kitti-root <tracking/training> --seqs 0000 0001 0020 \
+    --frames 200 --json reports/f2_detector.json                        # P50/P95/P99 + VRAM + recall (CI95)
 ```
 
 Profundidad (F3), en la máquina con GPU:
@@ -70,6 +74,14 @@ Fusión métrica (F4):
 uv run python scripts/eval_fusion_synthetic.py --json out/f4_synth.json   # DoD sintéticos + P95 CPU (sin GPU)
 uv run python scripts/eval_fusion_kitti.py --root <kitti_tracking/training> --seq 0000 \
     --engine models/depth_924x280_fp16.engine --json out/f4_kitti.json    # AbsRel 0–30 / 30–60 m (GPU)
+```
+
+Tracking 3D (F5):
+
+```bash
+uv run python scripts/eval_tracking_synthetic.py --json out/f5_synth.json  # RMSE V, Δt jitter, estáticos, P95 CPU
+uv run python scripts/eval_tracking_kitti.py --root <kitti_tracking/training> \
+    --seqs 0000 0001 0020 --ego oxts --json out/f5_kitti.json               # necesita training/oxts/
 ```
 
 ## Desarrollo

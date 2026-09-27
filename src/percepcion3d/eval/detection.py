@@ -73,6 +73,8 @@ class GtBox:
     frame: int
     kitti_type: str
     box: tuple[float, float, float, float]
+    truncated: float = 0.0
+    occluded: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,44 @@ class PredBox:
     class_name: str
     score: float
     box: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class GtFilter:
+    """Which GT boxes are *scored*; the rest are ignored (matches to them are neither TP nor FP).
+
+    Defaults follow the KITTI 2D benchmark "moderate" difficulty: box height
+    ≥ 25 px, occlusion level ≤ 1 (partly occluded), truncation ≤ 0.30.
+    ``None`` disables a criterion.
+    """
+
+    min_height_px: float = 25.0
+    max_occluded: int | None = 1
+    max_truncated: float | None = 0.30
+
+    def keeps(self, g: GtBox) -> bool:
+        if (g.box[3] - g.box[1]) < self.min_height_px:
+            return False
+        if self.max_occluded is not None and g.occluded > self.max_occluded:
+            return False
+        return self.max_truncated is None or g.truncated <= self.max_truncated
+
+
+KITTI_MODERATE = GtFilter()
+KITTI_EASY = GtFilter(min_height_px=40.0, max_occluded=0, max_truncated=0.15)
+HEIGHT_ONLY = GtFilter(max_occluded=None, max_truncated=None)
+
+
+def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion ``k/n`` (default 95 %)."""
+    if n <= 0:
+        return float("nan"), float("nan")
+    p = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    centre = (p + z2 / (2 * n)) / denom
+    half = z * float(np.sqrt(p * (1.0 - p) / n + z2 / (4 * n * n))) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
 
 
 @dataclass(frozen=True)
@@ -98,24 +138,41 @@ class ClassRecall:
     def precision(self) -> float:
         return self.n_matched / self.n_pred if self.n_pred else float("nan")
 
+    @property
+    def recall_ci95(self) -> tuple[float, float]:
+        return wilson_interval(self.n_matched, self.n_gt)
+
+    def verdict(self, threshold: float) -> str:
+        """``PASS``/``FAIL`` only when the 95 % interval lies on one side of ``threshold``."""
+        lo, hi = self.recall_ci95
+        if not self.n_gt:
+            return "NO-DATA"
+        if lo >= threshold:
+            return "PASS"
+        if hi < threshold:
+            return "FAIL"
+        return "INCONCLUSIVE"
+
 
 def recall_by_type(
     preds: Iterable[PredBox],
     gts: Iterable[GtBox],
     iou_threshold: float = 0.5,
     type_to_classes: Mapping[str, Sequence[str]] = DEFAULT_KITTI_TO_COCO,
-    min_gt_height_px: float = 25.0,
+    gt_filter: GtFilter = KITTI_MODERATE,
 ) -> dict[str, ClassRecall]:
     """Per-KITTI-type recall at ``iou_threshold`` over all frames.
 
-    GT boxes shorter than ``min_gt_height_px`` are ignored (KITTI "moderate"
-    difficulty uses 25 px), as are GT types absent from ``type_to_classes``.
+    GT boxes rejected by ``gt_filter`` still take part in matching, but a
+    prediction matched to one is dropped from ``n_pred`` (KITTI "ignore"
+    semantics), so hard objects neither lower recall nor count as false
+    positives. GT types absent from ``type_to_classes`` are skipped.
     Predictions whose class maps to several KITTI types are matched against
     each of them independently, so precision is only indicative.
     """
     gt_by_frame: dict[int, list[GtBox]] = {}
     for g in gts:
-        if g.kitti_type in type_to_classes and (g.box[3] - g.box[1]) >= min_gt_height_px:
+        if g.kitti_type in type_to_classes:
             gt_by_frame.setdefault(g.frame, []).append(g)
     pred_by_frame: dict[int, list[PredBox]] = {}
     for p in preds:
@@ -128,26 +185,45 @@ def recall_by_type(
         for frame in sorted(set(gt_by_frame) | set(pred_by_frame)):
             g_list = [g for g in gt_by_frame.get(frame, []) if g.kitti_type == kitti_type]
             p_list = [p for p in pred_by_frame.get(frame, []) if p.class_name in names]
-            n_gt += len(g_list)
-            n_pred += len(p_list)
-            if not g_list or not p_list:
+            kept = np.array([gt_filter.keeps(g) for g in g_list], dtype=bool)
+            n_gt += int(kept.sum())
+            if not p_list:
                 continue
-            _, matched = match_greedy(
+            if not g_list:
+                n_pred += len(p_list)
+                continue
+            assign, matched = match_greedy(
                 np.array([p.box for p in p_list]),
                 np.array([p.score for p in p_list]),
                 np.array([g.box for g in g_list]),
                 iou_threshold,
             )
-            n_matched += int(matched.sum())
+            n_matched += int((matched & kept).sum())
+            n_pred += int(sum(1 for a in assign if a < 0 or kept[a]))
         out[kitti_type] = ClassRecall(kitti_type, n_gt, n_matched, n_pred)
     return out
 
 
+def merge_recall(parts: Iterable[Mapping[str, ClassRecall]]) -> dict[str, ClassRecall]:
+    """Pool per-sequence counts (micro-average), e.g. over several KITTI sequences."""
+    acc: dict[str, list[int]] = {}
+    for rows in parts:
+        for t, r in rows.items():
+            c = acc.setdefault(t, [0, 0, 0])
+            c[0] += r.n_gt
+            c[1] += r.n_matched
+            c[2] += r.n_pred
+    return {t: ClassRecall(t, c[0], c[1], c[2]) for t, c in acc.items()}
+
+
 def format_recall(rows: Mapping[str, ClassRecall]) -> str:
-    lines = [f"{'type':<12}{'n_gt':>7}{'matched':>9}{'n_pred':>8}{'recall':>8}{'prec':>7}"]
+    lines = [
+        f"{'type':<12}{'n_gt':>7}{'matched':>9}{'n_pred':>8}{'recall':>8}{'CI95':>15}{'prec':>7}"
+    ]
     for r in rows.values():
+        lo, hi = r.recall_ci95
         lines.append(
             f"{r.kitti_type:<12}{r.n_gt:>7d}{r.n_matched:>9d}{r.n_pred:>8d}"
-            f"{r.recall:>8.3f}{r.precision:>7.3f}"
+            f"{r.recall:>8.3f}{f'[{lo:.3f},{hi:.3f}]':>15}{r.precision:>7.3f}"
         )
     return "\n".join(lines)

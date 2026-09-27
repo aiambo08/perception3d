@@ -142,10 +142,21 @@ reproducción a 60 Hz: 60.5 Hz logrados, jitter P99 0.01 ms (sleep + spin de
 - `detection/config.py` + `configs/models.yaml`: pesos, `input_hw`, NMS,
   clases a conservar, mapeo COCO→KITTI y umbrales DoD en un solo sitio.
 - `eval/detection.py`: IoU, *matching* codicioso por score y `recall_by_type`
-  (COCO→KITTI, GT < 25 px ignorado).
+  (COCO→KITTI). Solo puntúan las GT de dificultad KITTI *moderate* (altura
+  ≥ 25 px, `occluded` ≤ 1, `truncated` ≤ 0.3); las demás se ignoran (un acierto
+  sobre ellas no es TP ni FP). Recall agregado sobre varias secuencias
+  (`merge_recall`) con intervalo de Wilson al 95 %: el veredicto DoD es
+  PASS/FAIL solo si el intervalo queda a un lado del umbral, si no
+  INCONCLUSIVE.
 - `scripts/export_trt.sh` (`trtexec`, FP16/INT8) y `scripts/bench_detector.py`
   (P50/P95/P99 de `det.gpu`, `det.postprocess`, `detector_e2e`; VRAM NVML
   baseline/carga/pico; recall opcional con etiquetas KITTI; JSON/CSV).
+- Contexto de cada medición (F2 y F3): `utils/gpu_state.py` muestrea con NVML
+  reloj SM, temperatura, potencia y motivos de limitación de reloj, y el JSON
+  indica qué fracción de la corrida estuvo limitada por temperatura o potencia.
+  Con WDDM (Windows nativo **y** WSL2) NVML no da memoria por proceso: la VRAM
+  del proceso se estima entonces como *uso del dispositivo − línea base previa
+  al contexto CUDA* (`process_source: device_delta`, cota superior).
 
 **DoD**
 - P95 ≤ 6 ms aislado en la GPU objetivo (FP16, YOLO-n, 1024×320) **[medir]**;
@@ -164,9 +175,20 @@ Primera cosa que hacer en la máquina objetivo:
 uv pip install -e ".[export]" && uv run python scripts/export_detector.py
 uv pip install -e ".[runtime]" && bash scripts/export_trt.sh \
     models/detector_1024x320.onnx models/detector_1024x320_fp16.engine fp16
-uv run python scripts/bench_detector.py --kitti <image_02/0000> \
-    --labels <label_02/0000.txt> --frames 200 --json reports/f2_detector.json
+uv run python scripts/bench_detector.py --kitti-root <tracking/training> \
+    --seqs 0000 0001 0020 --frames 200 --json reports/f2_detector.json
 ```
+
+**Primera medición** (RTX 4060 Laptop, Windows 11, TRT 10.16 FP16):
+`detector_e2e` P95 = 2.41 ms ✔. Recall `Car` 84.4 % en la 0000 con el filtro
+antiguo (solo altura), que contaba coches muy ocluidos o truncados y con una
+sola secuencia no distingue 84 % de 85 %; queda por repetir con *moderate* y
+varias secuencias. La VRAM por proceso no estaba disponible (WDDM). En F3,
+Spearman 0.959 ✔ y VRAM total 1370 MB ✔, pero la latencia pasó de un P50 de
+15 ms en frío a 40–46 ms tras horas de carga, lo que apunta a throttling
+térmico o de potencia. WSL2 comparte el driver WDDM con Windows, así que no
+elimina esa fuente; la repetición debe ir acompañada del registro de
+`gpu_state`.
 
 ---
 
@@ -337,29 +359,74 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
 
 ---
 
-## F5 · Tracking 3D y ego-motion
+## F5 · Tracking 3D y ego-motion — ✔ implementado (CPU); KITTI pendiente de medir
 
 **Alcance**
 - `tracking/byte_tracker.py`: ByteTrack 2D (IoU, dos umbrales, Hungarian con
-  `scipy.optimize.linear_sum_assignment`), ids estables, edad/hits.
-- `tracking/kalman_filter.py`: KF lineal CV en $[X, Z, \dot X, \dot Z]$
-  con $F(\Delta t)$, $Q(\Delta t)$ por clase, $R_k$ por medición desde
-  `Measurement3D` (diseño I); soporte de medición retrasada (R6).
-- `tracking/ego_motion.py`: `EgoMotionProvider` (protocolo) con `Zero`,
-  `KittiOxts`, `ConstantVelocity`; compensación en la predicción; velocidad
-  absoluta derivada y etiqueta estático/móvil con histéresis.
-- `tracking/tracker3d.py`: orquestación (asociación 2D → actualización 3D →
-  gestión de vida) → `Track3D(id, x, P, cls, age, flags)`.
+  `scipy.optimize.linear_sum_assignment`), ids estables, edad/hits. KF de caja
+  $[c_x, c_y, w, h]$ + velocidades con $\Delta t$ real; asociación restringida
+  por grupo de clase (`car/van/truck/bus` → vehículo, etc.).
+- `tracking/kalman_filter.py`: KF lineal CV en $[X, Z, V_X, V_Z]$
+  con $F(\Delta t)$, $Q(\Delta t)$ CWNA por clase, $R_k$ por medición desde
+  `Measurement3D` (diseño I); medición retrasada con $H = [I, -\ell I]$ y
+  $R + q\ell^3/3$ (R6); gating $\chi^2$ del NIS. Predicción/corrección
+  vectorizadas para todos los tracks del frame (`predict_batch`/`update_batch`).
+- `tracking/ego_motion.py`: `EgoMotionProvider` (protocolo) con
+  `ZeroEgoMotion`, `ConstantEgoMotion` y `OxtsEgoMotion` (`vf`, `vl`, `wu`
+  interpolados, brazo de palanca IMU→cámara). La predicción expresa el estado
+  en los ejes de la pose nueva: $p' = R^\top(\psi)(p + V\Delta t - t)$,
+  $V' = R^\top V$.
+- `tracking/tracker3d.py`: orquestación (ByteTrack → medición F4 →
+  predicción/actualización 3D → vida) → `Track3D` con posición, velocidad
+  absoluta y relativa ($V - v_{ego}$) y sus covarianzas, NIS y
+  `MotionState` (estático/móvil/desconocido).
 
-**DoD**
-- Sintético: RMSE de $\dot Z$ ≤ 0.5 m/s a 15 m con ruido nominal tras 1 s
-  de track; sin divergencia con $\Delta t$ ∈ [10, 50] ms aleatorio.
-- KITTI tracking (3 secuencias): ID switches ≤ ByteTrack de referencia +10 %;
-  RMSE de velocidad relativa vs. GT ≤ 1.0 m/s en 0–30 m **[medir]**.
-- Con `KittiOxts`, ≥ 90 % de los objetos estáticos del GT etiquetados como
-  estáticos tras 0.5 s; con `Zero`, la velocidad relativa no cambia (invariante
-  para TTC).
-- Coste CPU P95 ≤ 1 ms para 30 tracks.
+**Decisiones**
+- **KF lineal, no EKF.** Con la medición ya en métrico $(X, Z)$ (F4) el modelo
+  de observación es lineal; la no linealidad píxel→métrico y el crecimiento
+  $\sigma_Z \propto Z^2$ ya están en $R_k$, incluida la correlación a lo
+  largo del rayo $\mathrm{cov}(X,Z) = (X/Z)\,\sigma_Z^2$
+  (`position_covariance`). El EKF solo compensaría si se midiera en
+  $(u, 1/Z)$, a cambio de Jacobianos por track.
+- **Estático/móvil por test estadístico**, no solo por umbral: candidato
+  estático si $|V| < 1$ m/s **o** $V^\top P_{VV}^{-1} V < \chi^2_{2,0.95}$;
+  móvil si $|V| > 2$ m/s **y** $\chi^2 > \chi^2_{2,0.999}$; histéresis de 0.3 s.
+  Con umbral fijo a 30–40 m el ruido de $V$ superaba 1 m/s y solo el 45 % de
+  los estáticos en curva se etiquetaban (ahora 100 %, 2.6 % de móviles como
+  estáticos). Sin ego-motion absoluto (`Zero`) la etiqueta es `unknown`.
+- **Identidades solo en 2D.** La etapa 3D nunca cambia ids, así que los ID
+  switches de F5 son los de ByteTrack con la configuración dada; el DoD
+  "≤ referencia +10 %" se cumple por construcción y el script los reporta
+  para comparar configuraciones (umbrales, cajas GT vs. detector).
+
+**DoD (medido en CPU, sintético, `scripts/eval_tracking_synthetic.py`, 3 semillas)**
+- RMSE de $\dot Z$ relativo a 15 m tras 1 s: **0.39 m/s** ≤ 0.5 ✔.
+- $\Delta t \in [10, 50]$ ms aleatorio: RMSE 0.36 m/s, NEES > $\chi^2_{4,0.99}$
+  en 0 % de las muestras (sin divergencia) ✔.
+- Giro 0.2 rad/s con ego-motion verdadero: 100 % de estáticos etiquetados
+  estáticos tras 0.5 s ✔ (sustituto sintético del DoD con OXTS).
+- `Zero` en recta: velocidad relativa idéntica a la del caso con ego-motion ✔.
+  En curva `Zero` diverge (NEES ≫, RMSE $V_X$ ≈ 4 m/s): el giro de la cámara
+  no modelado es un término $\omega \times p$ que ningún CV absorbe; es la
+  razón para usar un proveedor con yaw en producción.
+- Coste CPU `Tracker3D.step`, 30 tracks: P95 **1.0–1.3 ms** en la CPU de
+  desarrollo (Xeon compartido, alta varianza entre ejecuciones) frente a
+  1 ms objetivo — **[medir]** en el portátil. Si no baja, siguiente palanca:
+  estado estructura-de-arrays (sin objetos por track).
+- KITTI tracking (3 secuencias, `scripts/eval_tracking_kitti.py`): RMSE de
+  velocidad relativa ≤ 1.0 m/s en 0–30 m y ≥ 90 % de estáticos con OXTS
+  **[medir]**. Necesita además `data_tracking_oxts.zip` (→ `training/oxts/`).
+  GT de velocidad: diferencia central ±2 frames de la etiqueta en G y, con
+  OXTS, $v_{rel} = \dot p + \omega(-Z, X)$; estático si $|v_{rel} + v_{ego}| < 0.5$ m/s.
+
+```bash
+uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
+# KITTI tracking training/ (+ oxts/):
+uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
+    --json reports/f5_kitti.json                                   # sin red: suelo + altura
+uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
+    --engine models/depth_924x280_fp16.engine --boxes detector --json reports/f5_kitti_det.json
+```
 
 ---
 

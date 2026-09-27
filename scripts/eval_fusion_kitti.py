@@ -30,83 +30,29 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-from numpy.typing import NDArray
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from percepcion3d.camera.calibration import load_camera_config_yaml  # noqa: E402
 from percepcion3d.camera.geometry import PinholeGeometry  # noqa: E402
-from percepcion3d.depth.config import load_depth_config  # noqa: E402
-from percepcion3d.depth.depth_trt import DepthEstimator, DepthMap  # noqa: E402
 from percepcion3d.depth.fusion import (  # noqa: E402
     MetricFusionStage,
     load_fusion_config,
     load_solver_configs,
 )
-from percepcion3d.depth.preprocess import DepthResize  # noqa: E402
-from percepcion3d.detection.config import load_detector_config  # noqa: E402
-from percepcion3d.detection.detector_trt import Detector  # noqa: E402
 from percepcion3d.eval.fusion_kitti import (  # noqa: E402
-    BoxProvider,
     DepthProvider,
     KittiTrackingSequence,
     flag_histogram,
     run_fusion_kitti,
 )
-from percepcion3d.runtime.buffer import FrameStamped  # noqa: E402
-from percepcion3d.runtime.trt_engine import TrtEngine  # noqa: E402
+from percepcion3d.eval.providers import (  # noqa: E402
+    detector_box_provider,
+    engine_depth_provider,
+    npy_depth_provider,
+)
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _npy_depth_provider(depth_dir: Path) -> DepthProvider:
-    def provide(fs: FrameStamped) -> DepthMap | None:
-        p = depth_dir / f"{fs.frame_id:06d}.npy"
-        if not p.is_file():
-            return None
-        arr: NDArray[np.float32] = np.load(p).astype(np.float32)
-        rs = DepthResize(fs.img.shape[0], fs.img.shape[1], arr.shape[0], arr.shape[1])
-        return DepthMap(fs.frame_id, fs.t_capture_ns, arr, "relative_disparity", rs)
-
-    return provide
-
-
-def _engine_depth_provider(args: argparse.Namespace, timer: StageTimer) -> DepthProvider:
-    depth_cfg = load_depth_config(args.models)
-    est = DepthEstimator(
-        TrtEngine(args.engine, use_cuda_graph=True, high_priority_stream=False),
-        depth_cfg.runtime_config(),
-        timer=timer,
-    )
-
-    def provide(fs: FrameStamped) -> DepthMap | None:
-        return est.infer_stamped(fs).wait()
-
-    return provide
-
-
-def _detector_box_provider(args: argparse.Namespace, timer: StageTimer) -> BoxProvider:
-    det_cfg = load_detector_config(args.models)
-    det = Detector(
-        TrtEngine(
-            args.det_engine or det_cfg.engine, use_cuda_graph=True, high_priority_stream=True
-        ),
-        det_cfg.runtime_config(),
-        timer=timer,
-    )
-    names = det_cfg.runtime_config()
-
-    def provide(fs: FrameStamped) -> tuple[NDArray[np.float64], NDArray[np.float64], list[str]]:
-        d = det.infer(fs.img)
-        return (
-            d.boxes.astype(np.float64),
-            d.scores.astype(np.float64),
-            [names.name_of(int(c)) for c in d.classes],
-        )
-
-    return provide
 
 
 def main() -> int:
@@ -144,10 +90,14 @@ def main() -> int:
 
     depth_provider: DepthProvider | None = None
     if args.engine is not None:
-        depth_provider = _engine_depth_provider(args, timer)
+        depth_provider = engine_depth_provider(args.engine, args.models, timer)
     elif args.depth_dir is not None:
-        depth_provider = _npy_depth_provider(args.depth_dir)
-    box_provider = _detector_box_provider(args, timer) if args.boxes == "detector" else None
+        depth_provider = npy_depth_provider(args.depth_dir)
+    box_provider = (
+        detector_box_provider(args.models, args.det_engine, timer)
+        if args.boxes == "detector"
+        else None
+    )
 
     res = run_fusion_kitti(
         seq.source(),
