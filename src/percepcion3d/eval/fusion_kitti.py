@@ -180,6 +180,15 @@ class ScoredSample:
     z_height_m: float
     sigma_z_m: float
     flags: int
+    dominant: int = -1
+    """Index of the largest BLUE weight (0 ground, 1 net, 2 height; ``-1`` none)."""
+
+
+def _pct(a: NDArray[np.float64]) -> dict[str, float]:
+    if a.size == 0:
+        return {}
+    p50, p95 = np.percentile(a, [50, 95])
+    return {"p50": float(p50), "p95": float(p95), "rms": float(np.sqrt(np.mean(a**2)))}
 
 
 @dataclass
@@ -244,6 +253,37 @@ class FusionKittiResult:
             out["cpu_ms_p50_p95_p99"] = [float(x) for x in p]
         return out
 
+    def stability(self) -> dict[str, Any]:
+        """Frame-to-frame consistency per GT track (consecutive frames only).
+
+        ``dz_err = ΔZ_fused − ΔZ_gt`` of the object centre: what a tracker differentiates
+        into velocity (``dz_err · fps`` m/s). Pairs are split by whether the dominant cue
+        changed between the two frames."""
+        by_tid: dict[int, list[ScoredSample]] = {}
+        for x in self.samples:
+            by_tid.setdefault(x.track_id, []).append(x)
+        err: list[float] = []
+        switched: list[bool] = []
+        for seq in by_tid.values():
+            seq.sort(key=lambda x: x.frame)
+            for a, b in zip(seq[:-1], seq[1:], strict=True):
+                if b.frame - a.frame != 1:
+                    continue
+                d = (b.z_center_m - a.z_center_m) - (b.gt_center_m - a.gt_center_m)
+                if not math.isfinite(d):
+                    continue
+                err.append(abs(d))
+                switched.append(a.dominant != b.dominant)
+        e = np.asarray(err, dtype=np.float64)
+        sw = np.asarray(switched, dtype=bool)
+        return {
+            "n_pairs": int(e.size),
+            "switch_frac": float(sw.mean()) if sw.size else float("nan"),
+            "abs_dz_err_m": _pct(e),
+            "abs_dz_err_m_switch": _pct(e[sw]),
+            "abs_dz_err_m_no_switch": _pct(e[~sw]),
+        }
+
     def format(self) -> str:
         lines = [
             f"frames {self.n_frames} (with depth {self.n_frames_with_depth}) · boxes fed "
@@ -279,6 +319,7 @@ def _score(
             z_height_m=m.z_height_m,
             sigma_z_m=m.sigma_z_m,
             flags=int(m.flags.value),
+            dominant=int(np.argmax(m.weights)) if np.any(m.weights > 0.0) else -1,
         )
     )
 

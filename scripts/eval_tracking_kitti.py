@@ -75,6 +75,18 @@ def main() -> int:
     ap.add_argument("--boxes", choices=("gt", "detector"), default="gt")
     ap.add_argument("--det-engine", type=Path, default=None)
     ap.add_argument(
+        "--q-vehicle",
+        type=float,
+        default=None,
+        help="Override dynamics.vehicle.q of --tracking (CWNA m²/s³)",
+    )
+    ap.add_argument(
+        "--arbitration",
+        choices=("select", "inflate"),
+        default=None,
+        help="Override gates.arbitration of --fusion",
+    )
+    ap.add_argument(
         "--robust-chi2",
         type=float,
         default=None,
@@ -93,10 +105,15 @@ def main() -> int:
 
     _, extr = load_camera_config_yaml(args.camera)
     fusion_cfg = load_fusion_config(args.fusion)
+    if args.arbitration is not None:
+        fusion_cfg = replace(fusion_cfg, arbitration=args.arbitration)
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
     trk_cfg = load_tracker_config(args.tracking)
     if args.robust_chi2 is not None:
         trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
+    if args.q_vehicle is not None:
+        veh = replace(trk_cfg.dynamics_for("car"), q=args.q_vehicle)
+        trk_cfg = replace(trk_cfg, dynamics={**trk_cfg.dynamics, "vehicle": veh})
     timer = StageTimer(capacity=8192)
     box_provider = (
         detector_box_provider(args.models, args.det_engine, timer)
@@ -156,13 +173,20 @@ def main() -> int:
                     f"P95 {st['p95']:.2f} bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
                     f" · GT spread {st['gt_spread_rmse']:.2f}"
                 )
-        for name in ("vz_err_vs_ref_vz", "vz_err_vs_ego_fwd"):
+        for name in ("vz_err_vs_ref_vz", "vz_err_vs_ego_fwd", "vz_err_vs_ref_az"):
             fit = d["diagnostics"][name]
             if "slope" in fit:
                 print(
                     f"    {name}: slope {fit['slope']:+.3f} intercept {fit['intercept']:+.2f} "
                     f"resid {fit['resid_rms']:.2f} (n={fit['n']})"
                 )
+        for group in ("by_ref_az_mps2", "by_track_age_s"):
+            for name, st in d["diagnostics"][group].items():
+                if st["n"]:
+                    print(
+                        f"    {group} {name:>9}: n={st['n']:4d} RMSE {st['rmse']:.2f} "
+                        f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
+                    )
         for name, st in d["diagnostics"].get("by_yaw_rate", {}).items():
             if st["n"]:
                 print(
@@ -187,6 +211,8 @@ def main() -> int:
             "depth": depth_mode,
             "boxes": args.boxes,
             "robust_chi2": trk_cfg.robust_chi2,
+            "q_vehicle": trk_cfg.dynamics_for("car").q,
+            "arbitration": fusion_cfg.arbitration,
             "per_seq": per_seq,
             "pass": ok,
         }

@@ -127,6 +127,10 @@ class FusionConfig:
     border_margin_px: float = 2.0
     """A box edge closer than this to the image border counts as truncated."""
     chi2_consistency: float = CHI2_99_1DOF
+    arbitration: str = "select"
+    """Inconsistent cues: ``select`` drops the odd one out of three (hard switch of the
+    dominant cue between frames); ``inflate`` keeps the BLUE of all cues and inflates σ
+    by ``sqrt(χ²/dof)``, which trades per-frame accuracy for temporal smoothness."""
     use_ground: bool = True
     use_net: bool = True
     use_height: bool = True
@@ -215,6 +219,7 @@ def load_fusion_config(path: Path | str) -> FusionConfig:
         min_box_height_px=float(gates.get("min_box_height_px", 12.0)),
         border_margin_px=float(gates.get("border_margin_px", 2.0)),
         chi2_consistency=float(gates.get("chi2_consistency", CHI2_99_1DOF)),
+        arbitration=str(gates.get("arbitration", "select")),
         sampling=sampling,
     )
 
@@ -609,10 +614,11 @@ class MetricFuser:
         chi2: float,
         flags: FusionFlag,
     ) -> tuple[float, float, NDArray[np.float64], float, FusionFlag]:
-        """Failed χ² test: with three cues drop the odd one out; with two, inflate σ."""
+        """Failed χ² test: with three cues (``select``) drop the odd one out; otherwise
+        inflate σ."""
         flags |= FusionFlag.INCONSISTENT
         idx = np.flatnonzero(active)
-        if idx.shape[0] == 3:
+        if idx.shape[0] == 3 and self.cfg.arbitration == "select":
             best: tuple[float, int, tuple[float, float, NDArray[np.float64], float]] | None = None
             for drop in idx:
                 pair = idx[idx != drop]

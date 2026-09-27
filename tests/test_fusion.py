@@ -424,6 +424,24 @@ def test_fuser_inconsistent_cues_are_arbitrated(geo: PinholeGeometry) -> None:
     assert m.sigma_z_m > naive[1] * m.z_cam_m**2 * 1.5  # σ inflated by the disagreement
 
 
+@pytest.mark.parametrize("mode", ["select", "inflate"])
+def test_arbitration_select_drops_odd_cue_inflate_keeps_all(mode: str) -> None:
+    fuser = MetricFuser(replace(_priors(), arbitration=mode))
+    rho = np.array([1 / 20.0, 1 / 20.2, 1 / 10.0])
+    sig = rho * 0.03
+    c = np.zeros(3)
+    act = np.ones(3, dtype=bool)
+    z0, s0, w0, chi0 = fuse_correlated(rho, sig, c)
+    z, s, w, chi2, flags = fuser._arbitrate(rho, sig, c, act, z0, s0, w0, chi0, FusionFlag(0))
+    assert FusionFlag.INCONSISTENT in flags
+    if mode == "select":
+        assert FusionFlag.HEIGHT_REJECTED in flags and w[2] == 0.0
+        assert 1 / z == pytest.approx(20.1, rel=0.01)
+    else:
+        assert FusionFlag.HEIGHT_REJECTED not in flags and np.all(w > 0.0)
+        assert z == pytest.approx(z0) and s == pytest.approx(s0 * np.sqrt(chi0 / 2))
+
+
 def test_pitch_error_moves_ground_and_height_apart_and_flags_it(geo: PinholeGeometry) -> None:
     """Road-only cues are blind to a pitch bias; the height prior is the term that sees it."""
     fuser = MetricFuser(_priors())

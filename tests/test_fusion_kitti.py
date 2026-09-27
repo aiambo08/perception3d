@@ -16,7 +16,9 @@ from percepcion3d.camera.geometry import PinholeGeometry
 from percepcion3d.depth.depth_trt import DepthMap
 from percepcion3d.depth.fusion import MetricFusionStage, load_fusion_config, load_solver_configs
 from percepcion3d.eval.fusion_kitti import (
+    FusionKittiResult,
     KittiTrackingSequence,
+    ScoredSample,
     gt_near_face_depth_m,
     is_scored,
     labels_to_boxes,
@@ -191,3 +193,25 @@ def test_run_fusion_kitti_detector_mode_matches_by_iou() -> None:
     assert res.n_boxes_fed == 6 and len(res.samples) == 3
     assert all(np.isfinite(s.z_cam_m) and np.isnan(s.z_net_m) for s in res.samples)
     assert res.dod()["abs_rel_0_30m"] < 0.1
+
+
+def _sample(frame: int, tid: int, z: float, gt: float, dom: int) -> ScoredSample:
+    nan = float("nan")
+    return ScoredSample(frame, tid, gt, gt, z, z, nan, nan, nan, 0.5, 0, dom)
+
+
+def test_stability_splits_frame_to_frame_error_by_dominant_switch() -> None:
+    res = FusionKittiResult()
+    res.samples = [
+        _sample(0, 1, 20.0, 20.0, 0),
+        _sample(1, 1, 19.0, 19.0, 0),  # ΔZ matches GT
+        _sample(2, 1, 19.5, 18.0, 2),  # switch → +1.5 m step error
+        _sample(4, 1, 17.0, 17.0, 2),  # gap: not a consecutive pair
+        _sample(0, 2, 10.0, 10.0, 1),
+        _sample(1, 2, 10.2, 10.0, 1),
+    ]
+    st = res.stability()
+    assert st["n_pairs"] == 3 and st["switch_frac"] == pytest.approx(1 / 3)
+    assert st["abs_dz_err_m_switch"]["p50"] == pytest.approx(1.5)
+    assert st["abs_dz_err_m_no_switch"]["p95"] == pytest.approx(0.19)
+    assert FusionKittiResult().stability()["abs_dz_err_m"] == {}

@@ -435,6 +435,16 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
   frente a $v_{ego}$ ⇒ OXTS) y actualización robusta del KF
   (`filter.robust_chi2`: NIS > 5.99 ⇒ $R\cdot\mathrm{NIS}/5.99$; los
   inliers no cambian, DoD sintéticos idénticos).
+  Resultado: robusto sin efecto (RMSE 0001 3.31 → 3.30); pendientes ≈ 0 frente
+  a GT y OXTS, y el desplazamiento de +0.8–1.0 m/s persiste con `--ego zero`
+  ⇒ ni escala ni OXTS. F4 en 0001 pasa por frame (AbsRel 9.9 %/11.4 %) pero con
+  468 `NET_BIMODAL` y 257 `INCONSISTENT` en 1432 cajas. Siguiente diagnóstico:
+  `vz_err_vs_ref_az` (pendiente $-\tau$ = retraso del CV), `by_ref_az_mps2`,
+  `by_track_age_s`; A/B con `--q-vehicle` y `--arbitration inflate`
+  (F4: BLUE de las tres pistas con σ inflada en vez de descartar la discrepante,
+  sin salto de fuente dominante). `eval_fusion_kitti.py` reporta `stability`:
+  |ΔZ_fus − ΔZ_gt| entre frames consecutivos por track (P50/P95/RMS), con y sin
+  cambio de pista dominante.
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
