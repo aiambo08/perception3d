@@ -50,6 +50,10 @@ from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _p95(p50_p95_p99: list[float]) -> float:
+    return p50_p95_p99[1] if p50_p95_p99 else float("nan")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -69,6 +73,12 @@ def main() -> int:
     ap.add_argument("--depth-dir", type=Path, default=None, help="Pre-computed <frame>.npy maps")
     ap.add_argument("--boxes", choices=("gt", "detector"), default="gt")
     ap.add_argument("--det-engine", type=Path, default=None)
+    ap.add_argument(
+        "--gt-alt-window",
+        type=int,
+        default=5,
+        help="Half window (frames) of the second GT velocity used to estimate its spread",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -118,14 +128,31 @@ def main() -> int:
             gt_kinematics(labels, geo, oxts),
             depth,
             box_provider,
+            gt_alt=gt_kinematics(labels, geo, oxts, half_window=args.gt_alt_window),
         )
         d = res.to_dict()
         per_seq[seq_id] = d
         print(
             f"{seq_id}: vel RMSE {d['rmse_vel_rel_mps']:.3f} m/s (vz {d['rmse_vz_rel_mps']:.3f}, "
             f"n={d['n_vel_samples']}, ref {d['velocity_reference']}) · IDSW {d['id_switches']} "
-            f"/ {d['n_gt_ids']} ids · static {d['static_frac']:.3f} (n={d['static_samples']})"
+            f"/ {d['n_gt_ids']} ids ({d['idsw_per_100_matches']:.2f}/100 matches) · "
+            f"static {d['static_frac']:.3f} (n={d['static_samples']}) · tracker P95 "
+            f"{_p95(d['tracker_ms_p50_p95_p99']):.2f} ms, fusion P95 "
+            f"{_p95(d['fusion_ms_p50_p95_p99']):.2f} ms"
         )
+        for name, st in d["diagnostics"]["by_distance_m"].items():
+            if st["n"]:
+                print(
+                    f"    Z {name:>5} m: n={st['n']:4d} RMSE {st['rmse']:.2f} P50 {st['p50']:.2f} "
+                    f"P95 {st['p95']:.2f} bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
+                    f" · GT spread {st['gt_spread_rmse']:.2f}"
+                )
+        for name, st in d["diagnostics"].get("by_yaw_rate", {}).items():
+            if st["n"]:
+                print(
+                    f"    {name:>20}: n={st['n']:4d} RMSE {st['rmse']:.2f} "
+                    f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
+                )
         ok &= d["rmse_vel_rel_mps"] <= 1.0
         if args.ego == "oxts":
             ok &= d["static_frac"] >= 0.9
