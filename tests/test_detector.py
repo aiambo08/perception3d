@@ -22,12 +22,17 @@ from percepcion3d.detection.detector_trt import (
 )
 from percepcion3d.detection.letterbox import Letterboxer, letterbox_params
 from percepcion3d.eval.detection import (
+    HEIGHT_ONLY,
+    KITTI_MODERATE,
+    ClassRecall,
     GtBox,
     PredBox,
     format_recall,
     iou_xyxy,
     match_greedy,
+    merge_recall,
     recall_by_type,
+    wilson_interval,
 )
 from percepcion3d.utils.profiling import StageTimer
 
@@ -403,3 +408,39 @@ def test_recall_nan_when_no_gt() -> None:
     assert rows["Car"].recall == 0.0 and np.isnan(rows["Car"].precision)
     rows = recall_by_type([], [], type_to_classes={"Car": ["car"]})
     assert np.isnan(rows["Car"].recall)
+
+
+def test_recall_ignores_hard_gt_without_counting_false_positives() -> None:
+    gts = [
+        GtBox(0, "Car", (0, 0, 100, 60), truncated=0.0, occluded=0),
+        GtBox(0, "Car", (200, 0, 300, 60), truncated=0.0, occluded=2),  # heavily occluded
+        GtBox(0, "Car", (400, 0, 500, 60), truncated=0.5, occluded=0),  # truncated
+    ]
+    preds = [
+        PredBox(0, "car", 0.9, (0, 0, 100, 60)),
+        PredBox(0, "car", 0.8, (200, 0, 300, 60)),  # hits an ignored GT
+    ]
+    mod = recall_by_type(preds, gts, type_to_classes={"Car": ["car"]}, gt_filter=KITTI_MODERATE)
+    assert mod["Car"] == ClassRecall("Car", 1, 1, 1)
+    loose = recall_by_type(preds, gts, type_to_classes={"Car": ["car"]}, gt_filter=HEIGHT_ONLY)
+    assert loose["Car"] == ClassRecall("Car", 3, 2, 2)
+
+
+def test_wilson_interval_and_verdict() -> None:
+    lo, hi = wilson_interval(84, 100)
+    assert lo < 0.84 < hi and lo == pytest.approx(0.7558, abs=1e-3)
+    assert hi == pytest.approx(0.8991, abs=1e-3)
+    assert wilson_interval(0, 10)[0] == 0.0 and wilson_interval(10, 10)[1] == 1.0
+    assert all(np.isnan(wilson_interval(0, 0)))
+    assert ClassRecall("Car", 100, 84, 100).verdict(0.85) == "INCONCLUSIVE"
+    assert ClassRecall("Car", 2000, 1900, 2000).verdict(0.85) == "PASS"
+    assert ClassRecall("Car", 2000, 1500, 2000).verdict(0.85) == "FAIL"
+    assert ClassRecall("Car", 0, 0, 0).verdict(0.85) == "NO-DATA"
+
+
+def test_merge_recall_pools_counts() -> None:
+    a = {"Car": ClassRecall("Car", 10, 8, 9)}
+    b = {"Car": ClassRecall("Car", 30, 27, 30), "Pedestrian": ClassRecall("Pedestrian", 5, 3, 4)}
+    m = merge_recall([a, b])
+    assert m["Car"] == ClassRecall("Car", 40, 35, 39)
+    assert m["Pedestrian"] == ClassRecall("Pedestrian", 5, 3, 4)
