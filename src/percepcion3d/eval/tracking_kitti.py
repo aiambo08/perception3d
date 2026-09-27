@@ -62,6 +62,7 @@ class GtKinematics:
     v_rel_xz: tuple[float, float] | None
     v_abs_mps: float | None
     yaw_rate_rps: float | None = None
+    ego_fwd_mps: float | None = None
 
 
 def gt_kinematics(
@@ -90,14 +91,16 @@ def gt_kinematics(
             v_rel: tuple[float, float] | None = None
             v_abs: float | None = None
             wu: float | None = None
+            vf: float | None = None
             if oxts is not None and f < len(oxts):
                 o = oxts[f]
                 vr = v + o.wu * np.array([-p[1], p[0]])
                 v_rel = (float(vr[0]), float(vr[1]))
                 v_abs = float(np.hypot(vr[0] - o.vl, vr[1] + o.vf))
                 wu = float(o.wu)
+                vf = float(o.vf)
             out[(f, tid)] = GtKinematics(
-                float(p[0]), float(p[1]), (float(v[0]), float(v[1])), v_rel, v_abs, wu
+                float(p[0]), float(p[1]), (float(v[0]), float(v[1])), v_rel, v_abs, wu, vf
             )
     return out
 
@@ -128,13 +131,32 @@ def _err_stats(e: NDArray[np.float64]) -> dict[str, Any]:
     }
 
 
+def _linfit(x: NDArray[np.float64], y: NDArray[np.float64]) -> dict[str, Any]:
+    """``y ≈ intercept + slope·x`` by least squares on finite pairs. For ``dvz`` against
+    the GT ``v_z``, a slope ``k − 1`` is the signature of a range scale error ``Z·k``
+    (it turns ``dZ/dt`` into ``k·dZ/dt``); a slope against ``v_ego`` alone that of an
+    ego-speed error."""
+    m = np.isfinite(x) & np.isfinite(y)
+    if int(m.sum()) < 3 or float(np.ptp(x[m])) == 0.0:
+        return {"n": int(m.sum())}
+    a = np.stack([np.ones(int(m.sum())), x[m]], axis=1)
+    coef, *_ = np.linalg.lstsq(a, y[m], rcond=None)
+    r = y[m] - a @ coef
+    return {
+        "n": int(m.sum()),
+        "intercept": float(coef[0]),
+        "slope": float(coef[1]),
+        "resid_rms": float(np.sqrt(np.mean(r**2))),
+    }
+
+
 @dataclass
 class TrackingKittiResult:
     n_frames: int = 0
     vel_err: list[tuple[float, float]] = field(default_factory=list)
-    diag: list[tuple[float, float, float, float, float, float]] = field(default_factory=list)
-    """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z)`` per sample, any distance
-    (``nan`` where unknown)."""
+    diag: list[tuple[float, ...]] = field(default_factory=list)
+    """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z, ref_vz, ego_fwd)`` per sample,
+    any distance (``nan`` where unknown)."""
     id_switches: int = 0
     n_gt_ids: int = 0
     n_matches: int = 0
@@ -146,8 +168,8 @@ class TrackingKittiResult:
     velocity_reference: str = "apparent"
 
     def diagnostics(self) -> dict[str, Any]:
-        d = np.asarray(self.diag, dtype=np.float64).reshape(-1, 6)
-        e, z, w, g = d[:, :2], d[:, 2], d[:, 3], d[:, 4:]
+        d = np.asarray(self.diag, dtype=np.float64).reshape(-1, 8)
+        e, z, w, g = d[:, :2], d[:, 2], d[:, 3], d[:, 4:6]
         by_bin: dict[str, Any] = {}
         for lo, hi in zip(DIAG_BINS_M[:-1], DIAG_BINS_M[1:], strict=True):
             m = (z >= lo) & (z < hi)
@@ -163,6 +185,10 @@ class TrackingKittiResult:
                 f"straight_lt_{TURN_YAW_RATE_RPS}": _err_stats(e[w < TURN_YAW_RATE_RPS]),
                 f"turning_ge_{TURN_YAW_RATE_RPS}": _err_stats(e[w >= TURN_YAW_RATE_RPS]),
             }
+        out["vz_err_vs_ref_vz"] = _linfit(d[:, 6], e[:, 1])
+        out["vz_err_vs_ego_fwd"] = _linfit(d[:, 7], e[:, 1])
+        ego = d[:, 7][np.isfinite(d[:, 7])]
+        out["ego_fwd_mps_mean"] = float(ego.mean()) if ego.size else float("nan")
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,7 +292,8 @@ def run_tracking_kitti(
             if ref_a is not None:
                 spread = (ref[0] - ref_a[0], ref[1] - ref_a[1])
             w = abs(k.yaw_rate_rps) if k.yaw_rate_rps is not None else float("nan")
-            res.diag.append((float(dv[0]), float(dv[1]), k.z_m, w, *spread))
+            ego_fwd = k.ego_fwd_mps if k.ego_fwd_mps is not None else float("nan")
+            res.diag.append((float(dv[0]), float(dv[1]), k.z_m, w, *spread, float(ref[1]), ego_fwd))
             if bin_m[0] <= k.z_m <= bin_m[1]:
                 res.vel_err.append((float(dv[0]), float(dv[1])))
     res.n_gt_ids = len(last_tid)

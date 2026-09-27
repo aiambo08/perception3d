@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,12 @@ def main() -> int:
     ap.add_argument("--boxes", choices=("gt", "detector"), default="gt")
     ap.add_argument("--det-engine", type=Path, default=None)
     ap.add_argument(
+        "--robust-chi2",
+        type=float,
+        default=None,
+        help="Override filter.robust_chi2 of --tracking (0 disables the robust update)",
+    )
+    ap.add_argument(
         "--gt-alt-window",
         type=int,
         default=5,
@@ -88,6 +95,8 @@ def main() -> int:
     fusion_cfg = load_fusion_config(args.fusion)
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
     trk_cfg = load_tracker_config(args.tracking)
+    if args.robust_chi2 is not None:
+        trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
     timer = StageTimer(capacity=8192)
     box_provider = (
         detector_box_provider(args.models, args.det_engine, timer)
@@ -147,6 +156,13 @@ def main() -> int:
                     f"P95 {st['p95']:.2f} bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
                     f" · GT spread {st['gt_spread_rmse']:.2f}"
                 )
+        for name in ("vz_err_vs_ref_vz", "vz_err_vs_ego_fwd"):
+            fit = d["diagnostics"][name]
+            if "slope" in fit:
+                print(
+                    f"    {name}: slope {fit['slope']:+.3f} intercept {fit['intercept']:+.2f} "
+                    f"resid {fit['resid_rms']:.2f} (n={fit['n']})"
+                )
         for name, st in d["diagnostics"].get("by_yaw_rate", {}).items():
             if st["n"]:
                 print(
@@ -170,6 +186,7 @@ def main() -> int:
             "ego": args.ego,
             "depth": depth_mode,
             "boxes": args.boxes,
+            "robust_chi2": trk_cfg.robust_chi2,
             "per_seq": per_seq,
             "pass": ok,
         }
