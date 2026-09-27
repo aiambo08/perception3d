@@ -359,7 +359,7 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
 
 ---
 
-## F5 · Tracking 3D y ego-motion — ✔ implementado (CPU); KITTI pendiente de medir
+## F5 · Tracking 3D y ego-motion — ✔ implementado; DoD KITTI de velocidad **no cumplido** (limitación aceptada)
 
 **Alcance**
 - `tracking/byte_tracker.py`: ByteTrack 2D (IoU, dos umbrales, Hungarian con
@@ -459,6 +459,31 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
   frente a la mediana del pitch implícito de las alturas; el residuo es el error
   de pitch que queda en $Z_g$) y overrides `--pitch-q`, `--sigma-pitch-deg` en
   ambos scripts KITTI.
+  Resultado (0001, con red): el pitch filtrado queda de media 0.48° por encima
+  del implícito de las alturas (P95 del residuo 1.9°); con $Z≈20$ m, $h=1.65$ m y
+  un coche que se acerca a 9 m/s eso vale $2Z\,\Delta\theta/h\cdot|\dot Z|≈1.8$ m/s,
+  casi toda la deriva del suelo (+2.2 m/s). `--pitch-q 1` mejora AbsRel
+  (8.7 → 8.0 % y 9.1 → 8.1 %) pero apenas la deriva (2.2 → 2.0 m/s), empeora el
+  salto entre frames (P95 0.70 → 0.95 m) y deja F5 igual (0001: 1.54 → 1.47 m/s,
+  sesgo +0.92). Dos causas identificadas en la serie de pitch: (1) el nominal
+  KITTI de `camera_kitti.yaml` (2.5°) frente a −0.06° de las alturas, con
+  `max_step_deg` = 3° recortando las medidas por debajo de −0.5° (inferencia: el
+  JSON no cuenta rechazos); (2) el filtro se bloquea en su gate $\chi^2$: la
+  varianza de medida $\pi/2/\sum w$ (σ ≈ 0.1°) es mucho menor que la dispersión
+  real (±1° entre frames), sigue el ruido hasta 2.9° (frames 52–96) y queda
+  congelado en 1.88° (frames 108–128, el tramo con −25 % en $Z_g$) hasta que su
+  incertidumbre crece.
+
+**Limitación aceptada (decisión de proyecto).** F5 se cierra con el DoD de
+velocidad relativa sin cumplir en tráfico urbano: RMSE 0–30 m de 1.22 m/s en
+0000 y 1.47–1.54 m/s en 0001 (límite 1.0), 0.88 m/s en 0020 ✔; estáticos
+≥ 98.8 % ✔; 0 ID switches con cajas GT ✔; `Tracker3D.step` P95 0.58–0.61 ms ✔.
+El sesgo de $+0.9$ m/s en $V_Z$ es un error sistemático del cue de suelo de F4
+(pitch), no del tracker, y F6 lo absorbe con cotas conservadoras
+($TTC_{low}$ con $-\dot Z + k\sigma_{\dot Z}$). Corrección pendiente en F4
+(no iniciada): pitch nominal KITTI ≈ 0°, varianza de medida robusta
+(máx. de la fórmula y la MAD de los pitches por objeto), gate suave con reinicio
+tras N rechazos y conteo de rechazos en el JSON.
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
@@ -471,16 +496,49 @@ uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --
 
 ---
 
-## F6 · Cinemática y seguridad
+## F6 · Cinemática y seguridad — ✔ implementado (CPU)
 
 **Alcance**
-- `safety/kinematics.py`: $t_{CPA}, d_{CPA}, TTC_{low}$ con propagación de σ.
-- `safety/gates.py`: corredor y compuertas de proximidad/trayectoria por
-  configuración (ancho del ego, márgenes, por clase).
-- `safety/ttc.py`: máquina de estados pura `step(state, kin, cfg, t_ns) ->
-  state` con histéresis, dwell, decaimiento en pérdida de track; salida
-  `Alert(track_id, level, ttc_low, d_cpa, reason)`.
-- Config `configs/safety.yaml`.
+- `safety/kinematics.py`: `RelativeKinematics` (marco del frontal del ego;
+  `kinematics_from_track` desplaza `ego.front_m` desde el origen cámara),
+  $t_{CPA}, d_{CPA}$ con $\sigma_{d}$ por jacobiano ($r ⟂ v$ en el CPA ⇒
+  $\partial d/\partial p = \hat r$, $\partial d/\partial v = t_{CPA}\hat r$,
+  con bloque cruzado $p$–$v$) y $TTC_{low} = \max(Z - L/2 - k\sigma_Z, 0) /
+  (-\dot Z + k\sigma_{\dot Z})$ (∞ si no se acerca).
+- `safety/gates.py`: `evaluate_gates` → `enter`/`hold` (umbrales de entrada /
+  de salida ×1.3 tiempo, ×1.2 distancia). Compuerta de **proximidad** sin
+  velocidad (en corredor: $|X| - k\sigma_X <$ semicorredor, hueco $<$ umbral) y
+  de **trayectoria**: $TTC_{low}$ sólo cuenta *en trayectoria* (en corredor
+  ahora, o acercándose con $d_{CPA} + k_{path}\sigma_d <$ semicorredor); fuera
+  de ella el objeto es "de paso" (`CAUTION` como máximo si $d_{CPA}$ cae en
+  corredor + `passing_margin_m`). Confirmación: `min_updates`, `max_coast_s`,
+  `max_pos_sigma_m`.
+- `safety/ttc.py`: `step(state, kinematics, cfg, t_ns) → (state, alerts)` pura
+  (dataclasses congeladas, sin reloj de pared): subida tras `enter_frames`
+  consecutivos (`CRITICAL` 1 frame en corredor; `path_frames` = 3 si sólo por
+  CPA), un track sin confirmar nunca sube; bajada al nivel `hold` sólo tras
+  `min_dwell_s` y con `hold < level` sostenido `exit_dwell_s`; track perdido:
+  −1 nivel cada `lost_decay_s`, nunca sube, olvido a `forget_s`.
+  `Alert(track_id, level, ttc_low_s, d_cpa_m, reason)`.
+- `configs/safety.yaml`; `eval/safety_synthetic.py` + `scripts/eval_safety_synthetic.py`.
+
+**Hallazgo de diseño: la cota inferior de $d_{CPA}$ produce falsas alarmas.**
+$\sigma_d ≈ t_{CPA}\,\sigma_V$ crece con el horizonte: con σ_V = 0.5 m/s y
+$t_{CPA}$ = 4 s, $d_{CPA} - 1.5\sigma_d$ convierte un coche que pasa a 1.5 m
+en objetivo en trayectoria (`WARNING`/`CRITICAL` en el 100 % de las semillas).
+Por eso la compuerta de trayectoria usa la cota *superior* ($d_{CPA} +
+k_{path}\sigma_d$, "en trayectoria con confianza"), la presencia actual en el
+corredor no depende de la velocidad y el objetivo sólo-CPA necesita
+`path_frames` consecutivos antes de `CRITICAL` (un outlier de 2.5σ en $V_X$ en
+un solo frame disparaba la entrada inmediata). Las cotas conservadoras se
+mantienen donde son seguras: hueco, velocidad de cierre y $|X|$.
+
+**Medido (sintético, 10 semillas, σ_Z = 5 % Z, σ_V = 0.5 m/s):** frontal
+`CRITICAL` 1.26–1.36 s antes del contacto ✔ (≥ 1.0); estático a 2 m con ego
+parado `CRITICAL` por proximidad ✔; adelantamiento a 1.5 m `CAUTION` máx. ✔;
+corte de trayectoria que intersecta `CRITICAL` ✔; cruce sin intersección
+`NONE` ✔; track intermitente (visible 0.7 s de cada 1 s) sin bajadas, ≤ 0.6
+transiciones/s ✔; determinista (hash de niveles) ✔; `step` P95 ≈ 9 µs/frame.
 
 **DoD**
 - Batería sintética en CI: colisión frontal (alerta CRITICAL ≥ 1.0 s antes),
@@ -491,6 +549,12 @@ uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --
 - Determinismo: mismas entradas → misma secuencia de estados (test con hash).
 - Propiedades (`hypothesis`, opcional): el nivel nunca sube con un track no
   confirmado; el nivel nunca baja antes del dwell mínimo.
+  *(Implementadas como tests con entradas aleatorias con semilla, sin
+  `hypothesis`, para no añadir dependencias.)*
+
+```bash
+uv run python scripts/eval_safety_synthetic.py --seeds 10 --json reports/f6_synth.json
+```
 
 ---
 

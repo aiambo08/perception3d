@@ -29,14 +29,19 @@ suelo + red + altura con error de pitch correlado, pitch en línea desde
 alturas de clase, `Measurement3D` con flags y timestamps) y F5 (tracking: ByteTrack 2D, KF CV
 en $[X, Z, V_X, V_Z]$ con $\Delta t$ variable, $R_k$ desde F4 y mediciones
 retrasadas, ego-motion `Zero`/`Constant`/`Oxts`, velocidad relativa y
-etiqueta estático/móvil) implementadas y
+etiqueta estático/móvil) y F6 (seguridad: $t_{CPA}$/$d_{CPA}$ con σ,
+$TTC_{low}$ conservador, compuertas de proximidad/trayectoria y máquina de
+alertas pura con histéresis, dwell y decaimiento) implementadas y
 testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
 recall, Spearman) y el DoD KITTI de F4 (AbsRel por bins) están pendientes de
 medirse en la GPU objetivo; los DoD sintéticos y de coste CPU de F4 se cumplen
 en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
-(`scripts/eval_tracking_synthetic.py`); el DoD KITTI de F5 y su coste CPU en
-el portátil están pendientes de medir. `safety/` y `runtime/pipeline.py` son
-esqueletos pendientes de F6–F7.
+(`scripts/eval_tracking_synthetic.py`) y F6 (`scripts/eval_safety_synthetic.py`).
+F5 en KITTI cumple estáticos, ID switches y coste CPU, pero no el RMSE de
+velocidad en tráfico urbano (0000/0001: 1.2–1.5 m/s frente a 1.0) por un
+sesgo del pitch del cue de suelo de F4 — limitación documentada en
+`docs/01_plan_fases_mvp.md`. `runtime/pipeline.py` es un esqueleto pendiente
+de F7.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -82,6 +87,12 @@ Tracking 3D (F5):
 uv run python scripts/eval_tracking_synthetic.py --json out/f5_synth.json  # RMSE V, Δt jitter, estáticos, P95 CPU
 uv run python scripts/eval_tracking_kitti.py --root <kitti_tracking/training> \
     --seqs 0000 0001 0020 --ego oxts --json out/f5_kitti.json               # necesita training/oxts/
+```
+
+Seguridad (F6):
+
+```bash
+uv run python scripts/eval_safety_synthetic.py --seeds 10 --json out/f6_synth.json  # batería de alertas + determinismo
 ```
 
 ## Desarrollo
