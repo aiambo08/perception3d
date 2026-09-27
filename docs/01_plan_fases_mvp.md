@@ -445,6 +445,20 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
   sin salto de fuente dominante). `eval_fusion_kitti.py` reporta `stability`:
   |ΔZ_fus − ΔZ_gt| entre frames consecutivos por track (P50/P95/RMS), con y sin
   cambio de pista dominante.
+  Resultado A/B (0001): `inflate` baja el P95 del salto entre frames de 1.25 a
+  0.70 m (con cambio de pista dominante: 17.7 → 1.2 m), mejora AbsRel
+  (9.9 → 8.7 % y 11.4 → 9.1 %) y deja F5 con red igual que sin red (RMSE 0001
+  3.30 → 1.64 m/s, estáticos 79 → 99.9 %) ⇒ `gates.arbitration: inflate` por
+  defecto. El retraso del CV no explica el sesgo (pendiente frente a $a_z$
+  −0.18 s; con $a_z≈0$ sigue +0.94 m/s; `--q-vehicle 4` sin efecto). La deriva
+  por track del error de cada pista en F4 lo localiza en el suelo: d(err)/dt
+  +2.2 m/s (red +0.2, altura −0.01, fusionada +0.9 ≈ sesgo del tracker); el suelo
+  subestima Z de −5 % a 5 m a −15 % a 35 m y hasta −25 % en los frames 50–150,
+  firma de pitch/pendiente mal estimados (≈ 0.5–1.2°). Diagnóstico añadido:
+  `pitch_series` / `pitch` en el JSON de `eval_fusion_kitti.py` (pitch filtrado
+  frente a la mediana del pitch implícito de las alturas; el residuo es el error
+  de pitch que queda en $Z_g$) y overrides `--pitch-q`, `--sigma-pitch-deg` en
+  ambos scripts KITTI.
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json

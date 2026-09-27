@@ -18,6 +18,7 @@ from percepcion3d.depth.fusion import MetricFusionStage, load_fusion_config, loa
 from percepcion3d.eval.fusion_kitti import (
     FusionKittiResult,
     KittiTrackingSequence,
+    PitchFrame,
     ScoredSample,
     gt_near_face_depth_m,
     is_scored,
@@ -171,6 +172,11 @@ def test_run_fusion_kitti_synthetic_scores_cars_and_passes_dod() -> None:
     assert rows[0].count == dod["n_0_30m"]
     assert "ground only" in res.metrics() and "AbsRel" in res.format()
     assert res.affine_s == pytest.approx(3.0, rel=0.05)
+    assert [p.frame for p in res.pitch_series] == list(range(n))
+    assert res.pitch_series[0].pitch_deg == pytest.approx(np.rad2deg(EXTR.pitch_rad))
+    ps = res.pitch_summary()
+    assert ps["n_frames"] == n and ps["n_frames_with_meas"] > 0
+    assert ps["residual_deg"]["p95"] < 0.5  # true pitch == nominal
 
 
 def test_run_fusion_kitti_detector_mode_matches_by_iou() -> None:
@@ -215,3 +221,17 @@ def test_stability_splits_frame_to_frame_error_by_dominant_switch() -> None:
     assert st["abs_dz_err_m_switch"]["p50"] == pytest.approx(1.5)
     assert st["abs_dz_err_m_no_switch"]["p95"] == pytest.approx(0.19)
     assert FusionKittiResult().stability()["abs_dz_err_m"] == {}
+
+
+def test_pitch_summary_residual_is_height_implied_minus_filtered() -> None:
+    res = FusionKittiResult()
+    res.pitch_series = [
+        PitchFrame(0, 2.5, 1.0, 3.5, 2),
+        PitchFrame(1, 2.7, 0.8, 3.1, 1),
+        PitchFrame(2, 2.9, 0.8, float("nan"), 0),
+    ]
+    ps = res.pitch_summary()
+    assert ps["n_frames"] == 3 and ps["n_frames_with_meas"] == 2
+    assert ps["residual_deg"]["mean"] == pytest.approx(0.7)
+    assert ps["filtered_deg"]["max"] == pytest.approx(2.9)
+    assert "residual_deg" not in FusionKittiResult().pitch_summary()

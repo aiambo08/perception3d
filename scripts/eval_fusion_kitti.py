@@ -30,6 +30,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from percepcion3d.camera.calibration import load_camera_config_yaml  # noqa: E402
@@ -77,6 +79,18 @@ def main() -> int:
         default=None,
         help="Override gates.arbitration of --fusion",
     )
+    ap.add_argument(
+        "--pitch-q",
+        type=float,
+        default=None,
+        help="Override pitch_filter.q_deg_per_sqrt_s of --fusion (online pitch agility)",
+    )
+    ap.add_argument(
+        "--sigma-pitch-deg",
+        type=float,
+        default=None,
+        help="Override noise.sigma_pitch_deg of --fusion (BLUE weight of the ground cue)",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -89,7 +103,11 @@ def main() -> int:
     fusion_cfg = load_fusion_config(args.fusion)
     if args.arbitration is not None:
         fusion_cfg = replace(fusion_cfg, arbitration=args.arbitration)
+    if args.sigma_pitch_deg is not None:
+        fusion_cfg = replace(fusion_cfg, sigma_pitch_rad=float(np.deg2rad(args.sigma_pitch_deg)))
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
+    if args.pitch_q is not None:
+        pit_cfg = replace(pit_cfg, q_rad_per_sqrt_s=float(np.deg2rad(args.pitch_q)))
     timer = StageTimer(capacity=8192)
     stage = MetricFusionStage(
         intr, geo, fusion_cfg, road_cfg, aff_cfg, pit_cfg,
@@ -132,6 +150,7 @@ def main() -> int:
         f"{stab['switch_frac']:.3f} · |ΔZ err| {stab['abs_dz_err_m']} m "
         f"(switch {stab['abs_dz_err_m_switch']}, no switch {stab['abs_dz_err_m_no_switch']})"
     )
+    print("\npitch (filtered vs. height-implied):", res.pitch_summary())
     print("\nDoD:")
     for k, v in dod.items():
         print(f"  {k}: {v}")
@@ -147,6 +166,10 @@ def main() -> int:
             "arbitration": fusion_cfg.arbitration,
             "dod": dod,
             "stability": stab,
+            "sigma_pitch_deg": float(np.rad2deg(fusion_cfg.sigma_pitch_rad)),
+            "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),
+            "pitch": res.pitch_summary(),
+            "pitch_series": [asdict(p) for p in res.pitch_series],
             "flags": flag_histogram(res),
             "stages": {n: asdict(s) for n, s in timer.report().items()},
             "samples": [s.__dict__ for s in res.samples],

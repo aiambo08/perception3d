@@ -23,6 +23,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from percepcion3d.camera.calibration import load_camera_config_yaml  # noqa: E402
@@ -98,6 +100,18 @@ def main() -> int:
         default=5,
         help="Half window (frames) of the second GT velocity used to estimate its spread",
     )
+    ap.add_argument(
+        "--pitch-q",
+        type=float,
+        default=None,
+        help="Override pitch_filter.q_deg_per_sqrt_s of --fusion (online pitch agility)",
+    )
+    ap.add_argument(
+        "--sigma-pitch-deg",
+        type=float,
+        default=None,
+        help="Override noise.sigma_pitch_deg of --fusion (BLUE weight of the ground cue)",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -107,7 +121,11 @@ def main() -> int:
     fusion_cfg = load_fusion_config(args.fusion)
     if args.arbitration is not None:
         fusion_cfg = replace(fusion_cfg, arbitration=args.arbitration)
+    if args.sigma_pitch_deg is not None:
+        fusion_cfg = replace(fusion_cfg, sigma_pitch_rad=float(np.deg2rad(args.sigma_pitch_deg)))
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
+    if args.pitch_q is not None:
+        pit_cfg = replace(pit_cfg, q_rad_per_sqrt_s=float(np.deg2rad(args.pitch_q)))
     trk_cfg = load_tracker_config(args.tracking)
     if args.robust_chi2 is not None:
         trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
@@ -213,6 +231,8 @@ def main() -> int:
             "robust_chi2": trk_cfg.robust_chi2,
             "q_vehicle": trk_cfg.dynamics_for("car").q,
             "arbitration": fusion_cfg.arbitration,
+            "sigma_pitch_deg": float(np.rad2deg(fusion_cfg.sigma_pitch_rad)),
+            "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),
             "per_seq": per_seq,
             "pass": ok,
         }

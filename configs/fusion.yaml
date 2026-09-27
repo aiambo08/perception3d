@@ -48,7 +48,7 @@ gates:
   min_box_height_px: 12
   border_margin_px: 2       # caja a ≤ 2 px del borde → truncada (sin Z_g abajo, sin Z_h arriba/abajo)
   chi2_consistency: 6.635   # χ² 99 % (1 gdl) para dos estimadores; con tres se usa 9.21
-  arbitration: select       # select: descarta la pista discrepante (salto de fuente entre frames); inflate: BLUE de todas con σ inflada
+  arbitration: inflate      # inflate: BLUE de todas con σ inflada (estable entre frames); select: descarta la pista discrepante (salto de fuente)
 
 sampling:
   shrink: 0.2               # recorte del ROI interior por lado
