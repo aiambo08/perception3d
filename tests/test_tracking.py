@@ -316,6 +316,33 @@ def test_gt_kinematics_apparent_and_translational_velocity() -> None:
     assert ko.v_rel_xz == pytest.approx((0.0, -10.0)) and ko.v_abs_mps == pytest.approx(0.0)
     kt = gt_kinematics(labels, geo, [_oxts(10.0, wu=0.1)] * 5)[(2, 7)]
     assert kt.v_rel_xz == pytest.approx((-0.1 * 18.0, -10.0 + 0.1 * 3.0))
+    assert k[(2, 7)].a_ref_xz == pytest.approx((0.0, 0.0))
+    assert k[(1, 7)].a_ref_xz is None  # velocity neighbours missing at the ends
+
+
+def test_gt_kinematics_acceleration_of_reference() -> None:
+    geo = PinholeGeometry(INTR, EXTR)
+    fps = 10.0
+    labels = {
+        f: [
+            KittiTrackLabel(
+                f,
+                3,
+                "Car",
+                0.0,
+                0,
+                0.0,
+                (0, 0, 100, 60),
+                (1.5, 1.8, 4.2),
+                (0.0, 1.65, 20.0 + 0.5 * -2.0 * (f / fps) ** 2),
+                math.pi / 2,
+            )
+        ]  # fmt: skip
+        for f in range(9)
+    }
+    k = gt_kinematics(labels, geo, half_window=1, fps=fps)
+    assert k[(4, 3)].a_ref_xz is not None
+    assert k[(4, 3)].a_ref_xz[1] == pytest.approx(-2.0, rel=0.02)
 
 
 def test_run_tracking_kitti_on_synthetic_sequence() -> None:
@@ -354,10 +381,10 @@ def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
     res = TrackingKittiResult(id_switches=3, n_matches=150)
     nan = float("nan")
     res.diag = [
-        (0.0, 1.0, 5.0, 0.0, 0.1, 0.0, -10.0, 10.0),
-        (0.0, -1.0, 5.0, 0.0, -0.1, 0.0, 10.0, 0.0),
-        (0.0, 3.0, 15.0, 0.2, nan, nan, -30.0, nan),
-        (4.0, 0.0, 25.0, 0.2, 0.0, 0.3, 0.0, 5.0),
+        (0.0, 1.0, 5.0, 0.0, 0.1, 0.0, -10.0, 10.0, -2.0, 1.5),
+        (0.0, -1.0, 5.0, 0.0, -0.1, 0.0, 10.0, 0.0, 2.0, 3.0),
+        (0.0, 3.0, 15.0, 0.2, nan, nan, -30.0, nan, -6.0, 5.0),
+        (4.0, 0.0, 25.0, 0.2, 0.0, 0.3, 0.0, 5.0, 0.0, 5.0),
     ]
     res.tracker_ms, res.fusion_ms = [0.5] * 4, [2.0] * 4
     d = res.to_dict()
@@ -376,6 +403,12 @@ def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
     assert fit["n"] == 4 and fit["slope"] == pytest.approx(-0.1) and fit["resid_rms"] < 1e-9
     assert d["diagnostics"]["vz_err_vs_ego_fwd"]["n"] == 3
     assert d["diagnostics"]["ego_fwd_mps_mean"] == pytest.approx(5.0)
+    lag = d["diagnostics"]["vz_err_vs_ref_az"]
+    assert lag["slope"] == pytest.approx(-0.5) and lag["resid_rms"] < 1e-9  # τ = 0.5 s
+    acc = d["diagnostics"]["by_ref_az_mps2"]
+    assert acc["-inf_-1.5"]["n"] == 2 and acc["-0.5_0.5"]["n"] == 1 and acc["1.5_inf"]["n"] == 1
+    age = d["diagnostics"]["by_track_age_s"]
+    assert [age[k]["n"] for k in ("1_2", "2_4", "4_inf")] == [1, 1, 2]
     assert d["idsw_per_100_matches"] == pytest.approx(2.0)
     assert d["tracker_ms_p50_p95_p99"] == pytest.approx([0.5] * 3)
     assert d["fusion_ms_p50_p95_p99"] == pytest.approx([2.0] * 3)

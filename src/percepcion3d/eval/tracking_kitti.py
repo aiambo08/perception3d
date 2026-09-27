@@ -28,9 +28,10 @@ at that distance.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -63,6 +64,9 @@ class GtKinematics:
     v_abs_mps: float | None
     yaw_rate_rps: float | None = None
     ego_fwd_mps: float | None = None
+    a_ref_xz: tuple[float, float] | None = None
+    """Acceleration of the velocity reference (``v_rel`` with OXTS, else ``v_app``), by
+    central difference of the velocities over the same window (m/s²)."""
 
 
 def gt_kinematics(
@@ -102,7 +106,19 @@ def gt_kinematics(
             out[(f, tid)] = GtKinematics(
                 float(p[0]), float(p[1]), (float(v[0]), float(v[1])), v_rel, v_abs, wu, vf
             )
+    for (f, tid), k in list(out.items()):
+        lo = next((f - j for j in range(half_window, 0, -1) if (f - j, tid) in out), None)
+        hi = next((f + j for j in range(half_window, 0, -1) if (f + j, tid) in out), None)
+        if lo is None or hi is None:
+            continue
+        r_lo, r_hi = _ref_velocity(out[(lo, tid)]), _ref_velocity(out[(hi, tid)])
+        a = (r_hi - r_lo) * fps / (hi - lo)
+        out[(f, tid)] = replace(k, a_ref_xz=(float(a[0]), float(a[1])))
     return out
+
+
+def _ref_velocity(k: GtKinematics) -> NDArray[np.float64]:
+    return np.asarray(k.v_rel_xz if k.v_rel_xz is not None else k.v_app_xz, dtype=np.float64)
 
 
 def _is_scored(lab: KittiTrackLabel, types: Sequence[str]) -> bool:
@@ -115,6 +131,8 @@ def _is_scored(lab: KittiTrackLabel, types: Sequence[str]) -> bool:
 
 
 DIAG_BINS_M: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 60.0)
+DIAG_ACCEL_BINS: tuple[float, ...] = (-math.inf, -1.5, -0.5, 0.5, 1.5, math.inf)
+DIAG_AGE_BINS_S: tuple[float, ...] = (1.0, 2.0, 4.0, math.inf)
 TURN_YAW_RATE_RPS = 0.05
 
 
@@ -155,7 +173,7 @@ class TrackingKittiResult:
     n_frames: int = 0
     vel_err: list[tuple[float, float]] = field(default_factory=list)
     diag: list[tuple[float, ...]] = field(default_factory=list)
-    """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z, ref_vz, ego_fwd)`` per sample,
+    """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z, ref_vz, ego_fwd, ref_az, age_s)`` per sample,
     any distance (``nan`` where unknown)."""
     id_switches: int = 0
     n_gt_ids: int = 0
@@ -168,7 +186,7 @@ class TrackingKittiResult:
     velocity_reference: str = "apparent"
 
     def diagnostics(self) -> dict[str, Any]:
-        d = np.asarray(self.diag, dtype=np.float64).reshape(-1, 8)
+        d = np.asarray(self.diag, dtype=np.float64).reshape(-1, 10)
         e, z, w, g = d[:, :2], d[:, 2], d[:, 3], d[:, 4:6]
         by_bin: dict[str, Any] = {}
         for lo, hi in zip(DIAG_BINS_M[:-1], DIAG_BINS_M[1:], strict=True):
@@ -189,6 +207,18 @@ class TrackingKittiResult:
         out["vz_err_vs_ego_fwd"] = _linfit(d[:, 7], e[:, 1])
         ego = d[:, 7][np.isfinite(d[:, 7])]
         out["ego_fwd_mps_mean"] = float(ego.mean()) if ego.size else float("nan")
+        # CV filter lag τ: e_vz ≈ −τ·a_z, so the slope against the GT acceleration is −τ.
+        out["vz_err_vs_ref_az"] = _linfit(d[:, 8], e[:, 1])
+        az = d[:, 8]
+        out["by_ref_az_mps2"] = {
+            f"{lo:g}_{hi:g}": _err_stats(e[(az >= lo) & (az < hi)])
+            for lo, hi in zip(DIAG_ACCEL_BINS[:-1], DIAG_ACCEL_BINS[1:], strict=True)
+        }
+        age = d[:, 9]
+        out["by_track_age_s"] = {
+            f"{lo:g}_{hi:g}": _err_stats(e[(age >= lo) & (age < hi)])
+            for lo, hi in zip(DIAG_AGE_BINS_S[:-1], DIAG_AGE_BINS_S[1:], strict=True)
+        }
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -293,7 +323,20 @@ def run_tracking_kitti(
                 spread = (ref[0] - ref_a[0], ref[1] - ref_a[1])
             w = abs(k.yaw_rate_rps) if k.yaw_rate_rps is not None else float("nan")
             ego_fwd = k.ego_fwd_mps if k.ego_fwd_mps is not None else float("nan")
-            res.diag.append((float(dv[0]), float(dv[1]), k.z_m, w, *spread, float(ref[1]), ego_fwd))
+            az = k.a_ref_xz[1] if k.a_ref_xz is not None else float("nan")
+            res.diag.append(
+                (
+                    float(dv[0]),
+                    float(dv[1]),
+                    k.z_m,
+                    w,
+                    *spread,
+                    float(ref[1]),
+                    ego_fwd,
+                    az,
+                    tr.age_s,
+                )
+            )
             if bin_m[0] <= k.z_m <= bin_m[1]:
                 res.vel_err.append((float(dv[0]), float(dv[1])))
     res.n_gt_ids = len(last_tid)

@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,12 @@ def main() -> int:
     ap.add_argument("--det-engine", type=Path, default=None)
     ap.add_argument("--max-occluded", type=int, default=1)
     ap.add_argument("--no-online-pitch", action="store_true")
+    ap.add_argument(
+        "--arbitration",
+        choices=("select", "inflate"),
+        default=None,
+        help="Override gates.arbitration of --fusion",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -81,6 +87,8 @@ def main() -> int:
     _, extr = load_camera_config_yaml(args.camera)
     geo = PinholeGeometry(intr, extr)
     fusion_cfg = load_fusion_config(args.fusion)
+    if args.arbitration is not None:
+        fusion_cfg = replace(fusion_cfg, arbitration=args.arbitration)
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
     timer = StageTimer(capacity=8192)
     stage = MetricFusionStage(
@@ -118,6 +126,12 @@ def main() -> int:
         print(timer.format_table())
     print("\nflags on scored samples:", flag_histogram(res))
     dod = res.dod()
+    stab = res.stability()
+    print(
+        f"\nstability: {stab['n_pairs']} consecutive pairs · dominant-cue switch "
+        f"{stab['switch_frac']:.3f} · |ΔZ err| {stab['abs_dz_err_m']} m "
+        f"(switch {stab['abs_dz_err_m_switch']}, no switch {stab['abs_dz_err_m_no_switch']})"
+    )
     print("\nDoD:")
     for k, v in dod.items():
         print(f"  {k}: {v}")
@@ -130,7 +144,9 @@ def main() -> int:
             "seq": args.seq,
             "depth": depth_mode,
             "boxes": args.boxes,
+            "arbitration": fusion_cfg.arbitration,
             "dod": dod,
+            "stability": stab,
             "flags": flag_histogram(res),
             "stages": {n: asdict(s) for n, s in timer.report().items()},
             "samples": [s.__dict__ for s in res.samples],
