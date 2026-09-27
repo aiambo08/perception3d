@@ -100,6 +100,9 @@ class Tracker3DConfig:
     default_dynamics: ClassDynamics = ClassDynamics(q=1.0, sigma_v0_mps=15.0)
     gate_chi2: float = 13.82
     """NIS gate (χ² 2 dof, 99.9 %)."""
+    robust_chi2: float | None = 5.99
+    """Above this NIS the measurement is down-weighted (``R·NIS/robust_chi2``); ``None``
+    disables it (plain gated KF)."""
     max_rejects: int = 3
     static_below_mps: float = 1.0
     moving_above_mps: float = 2.0
@@ -258,6 +261,7 @@ class Tracker3D:
                 np.array([k.q for k in kfs]),
                 np.array([max(0.0, (t_ns - m.t_ns) * 1e-9) for _, m in upd]),
                 self.cfg.gate_chi2,
+                self.cfg.robust_chi2,
             )
             for i, (su, _) in enumerate(upd):
                 su.kf.x, su.kf.P, su.last_nis = x[i], p[i], float(nis[i])

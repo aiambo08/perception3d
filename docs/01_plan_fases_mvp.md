@@ -426,6 +426,15 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
   sesgo, RMSE, P50/P95; dispersión de la GT (±2 frente a `--gt-alt-window`
   ±5) como cota inferior del RMSE; error en recta vs. giro (|ω| ≥ 0.05 rad/s);
   y tiempos separados `fusion_ms` (F4) / `tracker_ms` (F5).
+  Con red (0000/0001/0020): dispersión GT 0.07–0.40 m/s (no limita);
+  `tracker_ms` P95 0.58–0.61 ms ✔; sesgo de $V_Z$ ≈ constante con la
+  distancia (+0.75 m/s en 0000, +0.75–1.8 en 0001, ≈ 0 en 0020) — firma de
+  error de escala × velocidad propia, no de ruido ∝ Z² — y colas en 0001
+  (P50 1.2, P95 7–10 m/s). Añadidos: regresión `vz_err_vs_ref_vz` /
+  `vz_err_vs_ego_fwd` (pendiente $k-1$ ⇒ escala de rango; pendiente solo
+  frente a $v_{ego}$ ⇒ OXTS) y actualización robusta del KF
+  (`filter.robust_chi2`: NIS > 5.99 ⇒ $R\cdot\mathrm{NIS}/5.99$; los
+  inliers no cambian, DoD sintéticos idénticos).
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json

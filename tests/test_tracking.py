@@ -354,10 +354,10 @@ def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
     res = TrackingKittiResult(id_switches=3, n_matches=150)
     nan = float("nan")
     res.diag = [
-        (0.0, 1.0, 5.0, 0.0, 0.1, 0.0),
-        (0.0, -1.0, 5.0, 0.0, -0.1, 0.0),
-        (0.0, 3.0, 15.0, 0.2, nan, nan),
-        (4.0, 0.0, 25.0, 0.2, 0.0, 0.3),
+        (0.0, 1.0, 5.0, 0.0, 0.1, 0.0, -10.0, 10.0),
+        (0.0, -1.0, 5.0, 0.0, -0.1, 0.0, 10.0, 0.0),
+        (0.0, 3.0, 15.0, 0.2, nan, nan, -30.0, nan),
+        (4.0, 0.0, 25.0, 0.2, 0.0, 0.3, 0.0, 5.0),
     ]
     res.tracker_ms, res.fusion_ms = [0.5] * 4, [2.0] * 4
     d = res.to_dict()
@@ -372,6 +372,26 @@ def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
     assert b["20-30"]["p95"] == pytest.approx(4.0) and b["30-60"]["n"] == 0
     y = d["diagnostics"]["by_yaw_rate"]
     assert y["straight_lt_0.05"]["n"] == 2 and y["turning_ge_0.05"]["n"] == 2
+    fit = d["diagnostics"]["vz_err_vs_ref_vz"]
+    assert fit["n"] == 4 and fit["slope"] == pytest.approx(-0.1) and fit["resid_rms"] < 1e-9
+    assert d["diagnostics"]["vz_err_vs_ego_fwd"]["n"] == 3
+    assert d["diagnostics"]["ego_fwd_mps_mean"] == pytest.approx(5.0)
     assert d["idsw_per_100_matches"] == pytest.approx(2.0)
     assert d["tracker_ms_p50_p95_p99"] == pytest.approx([0.5] * 3)
     assert d["fusion_ms_p50_p95_p99"] == pytest.approx([2.0] * 3)
+
+
+def test_update_batch_robust_bounds_outlier_pull() -> None:
+    x = np.array([[0.0, 20.0, 0.0, 0.0]])
+    p = np.diag([0.25, 0.25, 1.0, 1.0])[None]
+    r = 0.25 * np.eye(2)[None]
+    q = np.ones(1)
+    z_in, z_out = np.array([[0.1, 20.2]]), np.array([[0.0, 22.0]])
+    x_in, _, _, _ = update_batch(x, p, z_in, r, q)
+    x_in_r, _, _, _ = update_batch(x, p, z_in, r, q, robust_chi2=5.99)
+    np.testing.assert_allclose(x_in_r, x_in)  # inliers: identical to the plain KF
+    x_out, _, _, nis = update_batch(x, p, z_out, r, q)
+    x_out_r, p_out_r, ok, nis_r = update_batch(x, p, z_out, r, q, gate_chi2=13.82, robust_chi2=5.99)
+    assert ok[0] and nis_r[0] == pytest.approx(nis[0]) and nis[0] > 5.99
+    assert 0.0 < x_out_r[0, 1] - 20.0 < x_out[0, 1] - 20.0
+    assert np.all(np.linalg.eigvalsh(p_out_r[0]) > 0)

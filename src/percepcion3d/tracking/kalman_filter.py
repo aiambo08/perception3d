@@ -128,6 +128,16 @@ def predict_batch(
     return x_new, 0.5 * (p_new + np.transpose(p_new, (0, 2, 1)))
 
 
+def _inv2(s: NDArray[np.float64]) -> NDArray[np.float64]:
+    det = s[:, 0, 0] * s[:, 1, 1] - s[:, 0, 1] * s[:, 1, 0]
+    out = np.empty_like(s)
+    out[:, 0, 0] = s[:, 1, 1] / det
+    out[:, 1, 1] = s[:, 0, 0] / det
+    out[:, 0, 1] = -s[:, 0, 1] / det
+    out[:, 1, 0] = -s[:, 1, 0] / det
+    return out
+
+
 def update_batch(
     x: NDArray[np.float64],
     p: NDArray[np.float64],
@@ -136,9 +146,14 @@ def update_batch(
     q: NDArray[np.float64],
     lag_s: NDArray[np.float64] | None = None,
     gate_chi2: float | None = None,
+    robust_chi2: float | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_], NDArray[np.float64]]:
     """Joseph-form position update of ``N`` filters; rows with ``NIS > gate_chi2`` are left
-    untouched. Returns ``(x, P, accepted, NIS)``."""
+    untouched. Returns ``(x, P, accepted, NIS)`` (NIS before any down-weighting).
+
+    With ``robust_chi2``, rows with ``NIS > robust_chi2`` are down-weighted by inflating
+    ``R`` by ``NIS / robust_chi2`` (one Huber-like IRLS step): a heavy-tailed depth jump
+    moves the state by a bounded amount instead of either fully or not at all."""
     n = x.shape[0]
     lag = np.zeros(n) if lag_s is None else np.asarray(lag_s, dtype=np.float64)
     h = np.zeros((n, 2, 4))
@@ -148,15 +163,14 @@ def update_batch(
     ht = np.transpose(h, (0, 2, 1))
     nu = np.asarray(z, dtype=np.float64) - np.einsum("nij,nj->ni", h, x)
     ph = p @ ht
-    s = h @ ph + rr
-    det = s[:, 0, 0] * s[:, 1, 1] - s[:, 0, 1] * s[:, 1, 0]
-    s_inv = np.empty_like(s)
-    s_inv[:, 0, 0] = s[:, 1, 1] / det
-    s_inv[:, 1, 1] = s[:, 0, 0] / det
-    s_inv[:, 0, 1] = -s[:, 0, 1] / det
-    s_inv[:, 1, 0] = -s[:, 1, 0] / det
+    s_inv = _inv2(np.asarray(h @ ph + rr, dtype=np.float64))
     nis = np.einsum("ni,nij,nj->n", nu, s_inv, nu)
     ok = np.ones(n, dtype=bool) if gate_chi2 is None else nis <= gate_chi2
+    if robust_chi2 is not None:
+        w = np.maximum(1.0, nis / robust_chi2)
+        if np.any(w > 1.0):
+            rr = rr * w[:, None, None]
+            s_inv = _inv2(np.asarray(h @ ph + rr, dtype=np.float64))
     k = ph @ s_inv
     x_new = x + np.einsum("nij,nj->ni", k, nu)
     ikh = np.eye(4) - k @ h
@@ -218,6 +232,7 @@ class CvKalman:
         r_xz: NDArray[np.float64],
         lag_s: float = 0.0,
         gate_chi2: float | None = None,
+        robust_chi2: float | None = None,
     ) -> tuple[bool, float]:
         """Joseph-form update; returns ``(accepted, NIS)`` (rejected when ``NIS > gate_chi2``)."""
         x, p, ok, nis = update_batch(
@@ -228,6 +243,7 @@ class CvKalman:
             np.array([self.q]),
             np.array([lag_s]),
             gate_chi2,
+            robust_chi2,
         )
         self.x, self.P = x[0], p[0]
         return bool(ok[0]), float(nis[0])
