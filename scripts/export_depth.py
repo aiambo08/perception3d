@@ -86,6 +86,17 @@ def export_one(cfg: DepthModelConfig, hw: tuple[int, int], args: argparse.Namesp
         export_raw_onnx(cfg.weights, hw, raw_path, args.opset)
 
     raw = onnx.load(str(raw_path))
+    # PyTorch >= 2.5 + DINOv2-based patch ops leave dim_param (symbolic) entries in the
+    # output even with dynamic_axes=None. ONNX shape inference cannot resolve them because
+    # they derive from runtime-computed patch sizes.  We know the static shape [1, H, W]
+    # from the dummy input, so stamp it directly onto the output descriptor before surgery.
+    expected_shape = [1, hw[0], hw[1]]
+    for out_info in raw.graph.output:
+        tt = out_info.type.tensor_type
+        if tt.HasField("shape") and len(tt.shape.dim) == len(expected_shape):
+            for dim, val in zip(tt.shape.dim, expected_shape):
+                dim.ClearField("dim_param")
+                dim.dim_value = val
     raw_hw = input_hw(raw)
     if raw_hw != hw:
         raise SystemExit(f"raw export input {raw_hw} != requested size {hw}")
