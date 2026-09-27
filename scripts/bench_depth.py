@@ -48,6 +48,7 @@ from percepcion3d.eval.lidar import (  # noqa: E402
 from percepcion3d.io.sources import ImageSequenceSource, KittiSequenceSource  # noqa: E402
 from percepcion3d.runtime.contention import ContentionResult, run_contention  # noqa: E402
 from percepcion3d.runtime.trt_engine import TrtEngine  # noqa: E402
+from percepcion3d.utils.gpu_state import GpuStateSampler, nvml_query_fn  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 from percepcion3d.utils.vram import VramSampler, nvml_sample_fn  # noqa: E402
 
@@ -138,7 +139,11 @@ def _run_mode(
     sanity = SanityAccumulator(scene)
     det: Detector | None = None
     depth: DepthEstimator | None = None
-    with VramSampler(interval_s=0.05, sample_fn=nvml_sample_fn()) as vram:
+    vram_fn = nvml_sample_fn()
+    with (
+        VramSampler(interval_s=0.05, sample_fn=vram_fn) as vram,
+        GpuStateSampler(interval_s=0.2, query_fn=nvml_query_fn()) as gpu,
+    ):
         base = vram.sample_once()
         try:
             if mode in ("det", "both"):
@@ -180,13 +185,16 @@ def _run_mode(
             if depth is not None:
                 depth.close()
         peak = vram.stop()
+        gpu_summary = gpu.stop()
 
     print(f"\n=== mode={mode} size={hw[1]}x{hw[0]} frames={res.frames} ===")
     print(timer.format_table())
     print(
-        f"VRAM process: baseline {base.process_mb:.0f} → loaded {after_load.process_mb:.0f} → "
-        f"peak {peak.process_mb:.0f} MB (GPU total peak {peak.gpu_mb:.0f} MB)"
+        f"VRAM process [{vram_fn.process_source}]: baseline {base.process_mb:.0f} → loaded "
+        f"{after_load.process_mb:.0f} → peak {peak.process_mb:.0f} MB "
+        f"(GPU total peak {peak.gpu_mb:.0f} MB)"
     )
+    print(gpu_summary.format())
     if depth is not None:
         print(
             f"depth maps: {res.depth_maps} ({res.depth_rate:.2f}/frame), "
@@ -210,7 +218,9 @@ def _run_mode(
             "loaded": after_load.process_mb,
             "peak": peak.process_mb,
             "gpu_peak": peak.gpu_mb,
+            "process_source": vram_fn.process_source,
         },
+        "gpu_state": gpu_summary.to_dict(),
         "depth_maps": res.depth_maps,
         "depth_skipped": res.depth_skipped,
         "max_lag_frames": res.max_lag,
@@ -249,7 +259,15 @@ def _dod_report(results: list[dict[str, Any]], dod: dict[str, float]) -> None:
             peak = float(r["vram_mb"]["peak"])
             ok = peak <= dod["total_vram_mb"]
             print(
-                f"VRAM both engines peak {peak:.0f} MB ≤ {dod['total_vram_mb']} → {'OK' if ok else 'FAIL'}"
+                f"VRAM both engines peak {peak:.0f} MB [{r['vram_mb']['process_source']}] ≤ "
+                f"{dod['total_vram_mb']} → {'OK' if ok else 'FAIL'}"
+            )
+        thermal = r["gpu_state"].get("thermal_frac")
+        power = r["gpu_state"].get("power_frac")
+        if (thermal is not None and thermal > 0.0) or (power is not None and power > 0.0):
+            print(
+                f"  [{r['mode']}] aviso: GPU limitada por throttling (thermal {thermal:.0%}, "
+                f"power {power:.0%}); las latencias no son de régimen nominal"
             )
 
 

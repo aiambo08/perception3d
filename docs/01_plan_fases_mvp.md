@@ -142,10 +142,21 @@ reproducción a 60 Hz: 60.5 Hz logrados, jitter P99 0.01 ms (sleep + spin de
 - `detection/config.py` + `configs/models.yaml`: pesos, `input_hw`, NMS,
   clases a conservar, mapeo COCO→KITTI y umbrales DoD en un solo sitio.
 - `eval/detection.py`: IoU, *matching* codicioso por score y `recall_by_type`
-  (COCO→KITTI, GT < 25 px ignorado).
+  (COCO→KITTI). Solo puntúan las GT de dificultad KITTI *moderate* (altura
+  ≥ 25 px, `occluded` ≤ 1, `truncated` ≤ 0.3); las demás se ignoran (un acierto
+  sobre ellas no es TP ni FP). Recall agregado sobre varias secuencias
+  (`merge_recall`) con intervalo de Wilson al 95 %: el veredicto DoD es
+  PASS/FAIL solo si el intervalo queda a un lado del umbral, si no
+  INCONCLUSIVE.
 - `scripts/export_trt.sh` (`trtexec`, FP16/INT8) y `scripts/bench_detector.py`
   (P50/P95/P99 de `det.gpu`, `det.postprocess`, `detector_e2e`; VRAM NVML
   baseline/carga/pico; recall opcional con etiquetas KITTI; JSON/CSV).
+- Contexto de cada medición (F2 y F3): `utils/gpu_state.py` muestrea con NVML
+  reloj SM, temperatura, potencia y motivos de limitación de reloj, y el JSON
+  indica qué fracción de la corrida estuvo limitada por temperatura o potencia.
+  Con WDDM (Windows nativo **y** WSL2) NVML no da memoria por proceso: la VRAM
+  del proceso se estima entonces como *uso del dispositivo − línea base previa
+  al contexto CUDA* (`process_source: device_delta`, cota superior).
 
 **DoD**
 - P95 ≤ 6 ms aislado en la GPU objetivo (FP16, YOLO-n, 1024×320) **[medir]**;
@@ -164,9 +175,20 @@ Primera cosa que hacer en la máquina objetivo:
 uv pip install -e ".[export]" && uv run python scripts/export_detector.py
 uv pip install -e ".[runtime]" && bash scripts/export_trt.sh \
     models/detector_1024x320.onnx models/detector_1024x320_fp16.engine fp16
-uv run python scripts/bench_detector.py --kitti <image_02/0000> \
-    --labels <label_02/0000.txt> --frames 200 --json reports/f2_detector.json
+uv run python scripts/bench_detector.py --kitti-root <tracking/training> \
+    --seqs 0000 0001 0020 --frames 200 --json reports/f2_detector.json
 ```
+
+**Primera medición** (RTX 4060 Laptop, Windows 11, TRT 10.16 FP16):
+`detector_e2e` P95 = 2.41 ms ✔. Recall `Car` 84.4 % en la 0000 con el filtro
+antiguo (solo altura), que contaba coches muy ocluidos o truncados y con una
+sola secuencia no distingue 84 % de 85 %; queda por repetir con *moderate* y
+varias secuencias. La VRAM por proceso no estaba disponible (WDDM). En F3,
+Spearman 0.959 ✔ y VRAM total 1370 MB ✔, pero la latencia pasó de un P50 de
+15 ms en frío a 40–46 ms tras horas de carga, lo que apunta a throttling
+térmico o de potencia. WSL2 comparte el driver WDDM con Windows, así que no
+elimina esa fuente; la repetición debe ir acompañada del registro de
+`gpu_state`.
 
 ---
 

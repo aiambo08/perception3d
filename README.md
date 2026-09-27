@@ -47,8 +47,8 @@ uv pip install -e ".[export]"
 uv run python scripts/export_detector.py --config configs/models.yaml   # YOLO → ONNX (uint8 + NMS)
 uv pip install -e ".[runtime]"
 bash scripts/export_trt.sh models/detector_1024x320.onnx models/detector_1024x320_fp16.engine fp16
-uv run python scripts/bench_detector.py --kitti <image_02/0000> --labels <label_02/0000.txt> \
-    --frames 200 --json reports/f2_detector.json                        # P50/P95/P99 + VRAM + recall
+uv run python scripts/bench_detector.py --kitti-root <tracking/training> --seqs 0000 0001 0020 \
+    --frames 200 --json reports/f2_detector.json                        # P50/P95/P99 + VRAM + recall (CI95)
 ```
 
 Profundidad (F3), en la máquina con GPU:
