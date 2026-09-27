@@ -12,7 +12,11 @@ from percepcion3d.camera.calibration import CameraIntrinsics, ExtrinsicMountConf
 from percepcion3d.camera.geometry import PinholeGeometry
 from percepcion3d.depth.fusion import MetricFusionStage, load_fusion_config
 from percepcion3d.eval.kitti import KittiTrackLabel
-from percepcion3d.eval.tracking_kitti import gt_kinematics, run_tracking_kitti
+from percepcion3d.eval.tracking_kitti import (
+    TrackingKittiResult,
+    gt_kinematics,
+    run_tracking_kitti,
+)
 from percepcion3d.eval.tracking_synthetic import (
     TrackingScenario,
     cpu_benchmark,
@@ -330,9 +334,44 @@ def test_run_tracking_kitti_on_synthetic_sequence() -> None:
     frames = [FrameStamped(k, scene.frame(k).t_ns, np.zeros((4, 4, 3), np.uint8)) for k in range(n)]
     stage = MetricFusionStage(INTR_F4, geo, load_fusion_config(ROOT / "configs" / "fusion.yaml"))
     trk = Tracker3D(load_tracker_config(ROOT / "configs" / "tracking.yaml"))
-    res = run_tracking_kitti(frames, labels, stage, trk, gt_kinematics(labels, geo))
+    gt = gt_kinematics(labels, geo)
+    res = run_tracking_kitti(
+        frames, labels, stage, trk, gt, gt_alt=gt_kinematics(labels, geo, half_window=5)
+    )
     d = res.to_dict()
     assert d["velocity_reference"] == "apparent" and d["n_frames"] == n
     assert d["id_switches"] == 0 and d["n_gt_ids"] == 2
     assert d["n_vel_samples"] > 20 and d["rmse_vel_rel_mps"] < 1.0, d
-    assert len(d["cpu_ms_p50_p95_p99"]) == 3
+    assert len(d["cpu_ms_p50_p95_p99"]) == 3 and len(d["tracker_ms_p50_p95_p99"]) == 3
+    assert d["idsw_per_100_matches"] == 0.0
+    bins = d["diagnostics"]["by_distance_m"]
+    assert sum(b["n"] for b in bins.values()) >= d["n_vel_samples"]
+    assert bins["10-20"]["n"] > 0 and bins["10-20"]["gt_spread_rmse"] < 0.2  # linear motion
+    assert "by_yaw_rate" not in d["diagnostics"]  # no OXTS → yaw rate unknown
+
+
+def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
+    res = TrackingKittiResult(id_switches=3, n_matches=150)
+    nan = float("nan")
+    res.diag = [
+        (0.0, 1.0, 5.0, 0.0, 0.1, 0.0),
+        (0.0, -1.0, 5.0, 0.0, -0.1, 0.0),
+        (0.0, 3.0, 15.0, 0.2, nan, nan),
+        (4.0, 0.0, 25.0, 0.2, 0.0, 0.3),
+    ]
+    res.tracker_ms, res.fusion_ms = [0.5] * 4, [2.0] * 4
+    d = res.to_dict()
+    b = d["diagnostics"]["by_distance_m"]
+    assert b["0-10"]["n"] == 2 and b["0-10"]["rmse"] == pytest.approx(1.0)
+    assert b["0-10"]["bias_xz"] == pytest.approx([0.0, 0.0])
+    assert b["0-10"]["p50"] == pytest.approx(1.0) and b["0-10"]["gt_spread_rmse"] == pytest.approx(
+        0.1
+    )
+    assert b["10-20"]["bias_xz"] == pytest.approx([0.0, 3.0])
+    assert np.isnan(b["10-20"]["gt_spread_rmse"])
+    assert b["20-30"]["p95"] == pytest.approx(4.0) and b["30-60"]["n"] == 0
+    y = d["diagnostics"]["by_yaw_rate"]
+    assert y["straight_lt_0.05"]["n"] == 2 and y["turning_ge_0.05"]["n"] == 2
+    assert d["idsw_per_100_matches"] == pytest.approx(2.0)
+    assert d["tracker_ms_p50_p95_p99"] == pytest.approx([0.5] * 3)
+    assert d["fusion_ms_p50_p95_p99"] == pytest.approx([2.0] * 3)

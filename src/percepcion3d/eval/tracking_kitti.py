@@ -15,10 +15,15 @@ into the ground frame G with the nominal mount pitch):
 Scored samples: labels of ``score_types`` with ``occluded ≤ 1``, ``truncated ≤ 0.3``,
 height ≥ 25 px, whose track is at least ``min_age_s`` old and ``Z ∈ bin_m``.
 
-ID switches are counted per GT id over every matched frame. The 3D stage never
-changes 2D identities (see :mod:`percepcion3d.tracking.tracker3d`), so the ByteTrack
-reference of the DoD is this same count; the number is reported to compare
-configurations (``byte_track`` thresholds, detector vs. GT boxes).
+ID switches are counted per GT id over every matched frame and normalised per 100
+matches. The 3D stage never changes 2D identities (see
+:mod:`percepcion3d.tracking.tracker3d`), so they only depend on the boxes and the
+``byte_track`` thresholds.
+
+Diagnostics: the velocity error is broken down by distance bin and by ego yaw rate
+(bias, RMSE, P50/P95 of ``|Δv|``). ``gt_alt`` (the same reference with a wider
+difference window) gives the spread of the GT itself, a floor on the attainable RMSE
+at that distance.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ class GtKinematics:
     """Apparent velocity ``dp/dt`` in G (m/s)."""
     v_rel_xz: tuple[float, float] | None
     v_abs_mps: float | None
+    yaw_rate_rps: float | None = None
 
 
 def gt_kinematics(
@@ -83,13 +89,15 @@ def gt_kinematics(
             v = (by_f[hi] - by_f[lo]) * fps / (hi - lo)
             v_rel: tuple[float, float] | None = None
             v_abs: float | None = None
+            wu: float | None = None
             if oxts is not None and f < len(oxts):
                 o = oxts[f]
                 vr = v + o.wu * np.array([-p[1], p[0]])
                 v_rel = (float(vr[0]), float(vr[1]))
                 v_abs = float(np.hypot(vr[0] - o.vl, vr[1] + o.vf))
+                wu = float(o.wu)
             out[(f, tid)] = GtKinematics(
-                float(p[0]), float(p[1]), (float(v[0]), float(v[1])), v_rel, v_abs
+                float(p[0]), float(p[1]), (float(v[0]), float(v[1])), v_rel, v_abs, wu
             )
     return out
 
@@ -103,23 +111,69 @@ def _is_scored(lab: KittiTrackLabel, types: Sequence[str]) -> bool:
     )
 
 
+DIAG_BINS_M: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 60.0)
+TURN_YAW_RATE_RPS = 0.05
+
+
+def _err_stats(e: NDArray[np.float64]) -> dict[str, Any]:
+    if e.shape[0] == 0:
+        return {"n": 0}
+    n = np.hypot(e[:, 0], e[:, 1])
+    return {
+        "n": int(e.shape[0]),
+        "rmse": float(np.sqrt(np.mean(n**2))),
+        "bias_xz": [float(e[:, 0].mean()), float(e[:, 1].mean())],
+        "p50": float(np.percentile(n, 50)),
+        "p95": float(np.percentile(n, 95)),
+    }
+
+
 @dataclass
 class TrackingKittiResult:
     n_frames: int = 0
     vel_err: list[tuple[float, float]] = field(default_factory=list)
+    diag: list[tuple[float, float, float, float, float, float]] = field(default_factory=list)
+    """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z)`` per sample, any distance
+    (``nan`` where unknown)."""
     id_switches: int = 0
     n_gt_ids: int = 0
     n_matches: int = 0
     static_samples: int = 0
     static_labelled: int = 0
     cpu_ms: list[float] = field(default_factory=list)
+    fusion_ms: list[float] = field(default_factory=list)
+    tracker_ms: list[float] = field(default_factory=list)
     velocity_reference: str = "apparent"
+
+    def diagnostics(self) -> dict[str, Any]:
+        d = np.asarray(self.diag, dtype=np.float64).reshape(-1, 6)
+        e, z, w, g = d[:, :2], d[:, 2], d[:, 3], d[:, 4:]
+        by_bin: dict[str, Any] = {}
+        for lo, hi in zip(DIAG_BINS_M[:-1], DIAG_BINS_M[1:], strict=True):
+            m = (z >= lo) & (z < hi)
+            st = _err_stats(e[m])
+            gm = g[m & np.all(np.isfinite(g), axis=1)]
+            st["gt_spread_rmse"] = (
+                float(np.sqrt(np.mean(np.sum(gm**2, axis=1)))) if gm.size else float("nan")
+            )
+            by_bin[f"{lo:.0f}-{hi:.0f}"] = st
+        out: dict[str, Any] = {"by_distance_m": by_bin}
+        if np.any(np.isfinite(w)):
+            out["by_yaw_rate"] = {
+                f"straight_lt_{TURN_YAW_RATE_RPS}": _err_stats(e[w < TURN_YAW_RATE_RPS]),
+                f"turning_ge_{TURN_YAW_RATE_RPS}": _err_stats(e[w >= TURN_YAW_RATE_RPS]),
+            }
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         e = np.asarray(self.vel_err, dtype=np.float64).reshape(-1, 2)
         rmse = float(np.sqrt(np.mean(np.sum(e**2, axis=1)))) if e.size else float("nan")
         rmse_z = float(np.sqrt(np.mean(e[:, 1] ** 2))) if e.size else float("nan")
-        cpu = np.asarray(self.cpu_ms, dtype=np.float64)
+
+        def pct(v: list[float]) -> list[float]:
+            a = np.asarray(v, dtype=np.float64)
+            return [float(x) for x in np.percentile(a, [50, 95, 99])] if a.size else []
+
         return {
             "n_frames": self.n_frames,
             "velocity_reference": self.velocity_reference,
@@ -127,15 +181,19 @@ class TrackingKittiResult:
             "rmse_vel_rel_mps": rmse,
             "rmse_vz_rel_mps": rmse_z,
             "id_switches": self.id_switches,
+            "idsw_per_100_matches": (
+                100.0 * self.id_switches / self.n_matches if self.n_matches else float("nan")
+            ),
             "n_gt_ids": self.n_gt_ids,
             "n_matches": self.n_matches,
             "static_samples": self.static_samples,
             "static_frac": (
                 self.static_labelled / self.static_samples if self.static_samples else float("nan")
             ),
-            "cpu_ms_p50_p95_p99": (
-                [float(x) for x in np.percentile(cpu, [50, 95, 99])] if cpu.size else []
-            ),
+            "cpu_ms_p50_p95_p99": pct(self.cpu_ms),
+            "fusion_ms_p50_p95_p99": pct(self.fusion_ms),
+            "tracker_ms_p50_p95_p99": pct(self.tracker_ms),
+            "diagnostics": self.diagnostics(),
         }
 
 
@@ -153,6 +211,7 @@ def run_tracking_kitti(
     static_age_s: float = 0.5,
     static_below_mps: float = 0.5,
     iou_threshold: float = 0.5,
+    gt_alt: dict[tuple[int, int], GtKinematics] | None = None,
 ) -> TrackingKittiResult:
     use_rel = any(k.v_rel_xz is not None for k in gt.values())
     res = TrackingKittiResult(velocity_reference="translational" if use_rel else "apparent")
@@ -172,8 +231,12 @@ def run_tracking_kitti(
         t0 = time.perf_counter()
         out = stage.process(fs.frame_id, fs.t_capture_ns, boxes, classes, depth)
         meas = [measurement_from_fusion(m) for m in out.measurements]
+        t1 = time.perf_counter()
         tracks = tracker.step(fs.t_capture_ns, boxes, scores, classes, meas)
-        res.cpu_ms.append((time.perf_counter() - t0) * 1e3)
+        t2 = time.perf_counter()
+        res.fusion_ms.append((t1 - t0) * 1e3)
+        res.tracker_ms.append((t2 - t1) * 1e3)
+        res.cpu_ms.append((t2 - t0) * 1e3)
         res.n_frames += 1
         for tr in tracks:
             lab = det_to_lab.get(tr.det_index)
@@ -194,9 +257,17 @@ def run_tracking_kitti(
                 res.static_samples += 1
                 res.static_labelled += int(tr.motion is MotionState.STATIC)
             ref = k.v_rel_xz if use_rel else k.v_app_xz
-            if ref is None or tr.age_s < min_age_s or not (bin_m[0] <= k.z_m <= bin_m[1]):
+            if ref is None or tr.age_s < min_age_s:
                 continue
             dv = tr.velocity_rel_xz - np.asarray(ref, dtype=np.float64)
-            res.vel_err.append((float(dv[0]), float(dv[1])))
+            spread = (float("nan"), float("nan"))
+            ka = gt_alt.get((fs.frame_id, lab.track_id)) if gt_alt is not None else None
+            ref_a = None if ka is None else (ka.v_rel_xz if use_rel else ka.v_app_xz)
+            if ref_a is not None:
+                spread = (ref[0] - ref_a[0], ref[1] - ref_a[1])
+            w = abs(k.yaw_rate_rps) if k.yaw_rate_rps is not None else float("nan")
+            res.diag.append((float(dv[0]), float(dv[1]), k.z_m, w, *spread))
+            if bin_m[0] <= k.z_m <= bin_m[1]:
+                res.vel_err.append((float(dv[0]), float(dv[1])))
     res.n_gt_ids = len(last_tid)
     return res

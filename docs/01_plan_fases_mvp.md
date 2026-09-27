@@ -397,7 +397,9 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
 - **Identidades solo en 2D.** La etapa 3D nunca cambia ids, así que los ID
   switches de F5 son los de ByteTrack con la configuración dada; el DoD
   "≤ referencia +10 %" se cumple por construcción y el script los reporta
-  para comparar configuraciones (umbrales, cajas GT vs. detector).
+  para comparar configuraciones (umbrales, cajas GT vs. detector). Como
+  criterio absoluto se reporta `idsw_per_100_matches` (umbral propuesto,
+  pendiente de fijar con datos: ≤ 1 IDSW/100 matches con detector).
 
 **DoD (medido en CPU, sintético, `scripts/eval_tracking_synthetic.py`, 3 semillas)**
 - RMSE de $\dot Z$ relativo a 15 m tras 1 s: **0.39 m/s** ≤ 0.5 ✔.
@@ -418,6 +420,12 @@ uv run python scripts/eval_fusion_kitti.py --root <training> --seq 0000     # si
   **[medir]**. Necesita además `data_tracking_oxts.zip` (→ `training/oxts/`).
   GT de velocidad: diferencia central ±2 frames de la etiqueta en G y, con
   OXTS, $v_{rel} = \dot p + \omega(-Z, X)$; estático si $|v_{rel} + v_{ego}| < 0.5$ m/s.
+  Primera medición (portátil del usuario, cajas GT, OXTS): RMSE 1.20 / 1.62 /
+  0.86 m/s en 0000 / 0001 / 0020 ✘; estáticos 99–100 % ✔. Diagnóstico en el
+  JSON (`diagnostics`): error por bins de Z (0–10/10–20/20–30/30–60 m) con
+  sesgo, RMSE, P50/P95; dispersión de la GT (±2 frente a `--gt-alt-window`
+  ±5) como cota inferior del RMSE; error en recta vs. giro (|ω| ≥ 0.05 rad/s);
+  y tiempos separados `fusion_ms` (F4) / `tracker_ms` (F5).
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
