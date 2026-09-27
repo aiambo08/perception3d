@@ -184,6 +184,18 @@ class ScoredSample:
     """Index of the largest BLUE weight (0 ground, 1 net, 2 height; ``-1`` none)."""
 
 
+@dataclass
+class PitchFrame:
+    frame: int
+    pitch_deg: float
+    """Filtered pitch used by the ground cue of this frame."""
+    sigma_deg: float
+    meas_median_deg: float
+    """Median of the per-object pitches implied by the height cue (``nan`` if none):
+    the pitch at which the ground and height cues of each box would agree."""
+    n_meas: int
+
+
 def _pct(a: NDArray[np.float64]) -> dict[str, float]:
     if a.size == 0:
         return {}
@@ -202,6 +214,7 @@ class FusionKittiResult:
     affine_s: float = float("nan")
     affine_t: float = float("nan")
     cpu_ms: list[float] = field(default_factory=list)
+    pitch_series: list[PitchFrame] = field(default_factory=list)
 
     def _cols(self) -> dict[str, NDArray[np.float64]]:
         s = self.samples
@@ -284,6 +297,35 @@ class FusionKittiResult:
             "abs_dz_err_m_no_switch": _pct(e[~sw]),
         }
 
+    def pitch_summary(self) -> dict[str, Any]:
+        """Filtered pitch vs. the height-implied pitch over the sequence.
+
+        ``residual = meas_median − filtered``: the pitch error left in the ground cue
+        (``ΔZ_g/Z_g ≈ −Z·Δθ/h``). A residual with slow, large excursions means the online
+        filter lags the road slope; one that stays small means the ground bias is elsewhere."""
+        filt = np.array([p.pitch_deg for p in self.pitch_series], dtype=np.float64)
+        meas = np.array([p.meas_median_deg for p in self.pitch_series], dtype=np.float64)
+        ok = np.isfinite(meas)
+        res = meas[ok] - filt[ok]
+        out: dict[str, Any] = {
+            "n_frames": int(filt.size),
+            "n_frames_with_meas": int(ok.sum()),
+        }
+        if filt.size:
+            out["filtered_deg"] = {
+                "mean": float(filt.mean()),
+                "min": float(filt.min()),
+                "max": float(filt.max()),
+            }
+        if res.size:
+            out["meas_median_deg"] = {
+                "mean": float(meas[ok].mean()),
+                "min": float(meas[ok].min()),
+                "max": float(meas[ok].max()),
+            }
+            out["residual_deg"] = {"mean": float(res.mean()), **_pct(np.abs(res))}
+        return out
+
     def format(self) -> str:
         lines = [
             f"frames {self.n_frames} (with depth {self.n_frames_with_depth}) · boxes fed "
@@ -359,6 +401,7 @@ def run_fusion_kitti(
             gt_boxes = np.array([lab.bbox for lab in scored], dtype=np.float64).reshape(-1, 4)
             assign, _ = match_greedy(boxes, scores, gt_boxes, iou_threshold)
             score_idx = [(i, scored[j]) for i, j in enumerate(assign.tolist()) if j >= 0]
+        pitch_used = stage.geometry().extrinsics.pitch_rad
         t0 = timer_ms() if timer_ms is not None else 0.0
         out = stage.process(fs.frame_id, fs.t_capture_ns, boxes, classes, depth)
         if timer_ms is not None:
@@ -370,6 +413,17 @@ def run_fusion_kitti(
         if out.affine is not None:
             res.affine_s, res.affine_t = out.affine.s, out.affine.t
         res.pitch_final_deg = float(np.rad2deg(out.pitch.pitch_rad))
+        th = np.array([m.pitch_meas_rad for m in out.measurements], dtype=np.float64)
+        th = th[np.isfinite(th)]
+        res.pitch_series.append(
+            PitchFrame(
+                frame=fs.frame_id,
+                pitch_deg=float(np.rad2deg(pitch_used)),
+                sigma_deg=float(np.rad2deg(out.pitch.sigma_rad)),
+                meas_median_deg=float(np.rad2deg(np.median(th))) if th.size else float("nan"),
+                n_meas=int(th.size),
+            )
+        )
     return res
 
 
