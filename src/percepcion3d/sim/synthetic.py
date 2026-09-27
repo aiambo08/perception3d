@@ -156,7 +156,7 @@ class SyntheticScene:
             if base_c[2] < _MIN_DEPTH_M:
                 continue
 
-            corners_g = _cuboid_corners(x, z, h, obj.width_m, obj.height_m, obj.length_m)
+            corners_g = cuboid_corners(x, z, h, obj.width_m, obj.height_m, obj.length_m)
             corners_c = corners_g @ r_gc.T
             if np.any(corners_c[:, 2] < _MIN_DEPTH_M):
                 continue
@@ -280,7 +280,7 @@ class SyntheticScene:
         return out, resize
 
 
-def _cuboid_corners(
+def cuboid_corners(
     x: float, z: float, h: float, width: float, height: float, length: float
 ) -> NDArray[np.float64]:
     """8 corners (ground frame) of an axis-aligned cuboid standing on ``Y_g = h``."""
