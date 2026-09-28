@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import astuple
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import numpy as np
@@ -519,6 +519,13 @@ def test_tracker3d_r_scale_inflates_measurement_covariance_and_loads_from_yaml()
         out[r] = tracks[0].cov[:2, :2]
     assert out[4.0] == pytest.approx(4.0 * out[1.0])
     assert load_tracker_config(ROOT / "configs" / "tracking.yaml").r_scale == 1.0
+
+
+def test_kitti_tracking_config_differs_only_in_vehicle_q() -> None:
+    base = load_tracker_config(ROOT / "configs" / "tracking.yaml")
+    kitti = load_tracker_config(ROOT / "configs" / "tracking_kitti.yaml")
+    assert kitti.dynamics_for("car").q == 4.0 and base.dynamics_for("car").q == 1.0
+    assert replace(kitti, dynamics={**kitti.dynamics, "vehicle": base.dynamics["vehicle"]}) == base
 
 
 @pytest.mark.parametrize(("r_true_scale", "lo", "hi"), [(1.0, 1.7, 2.3), (4.0, 4.0, 12.0)])

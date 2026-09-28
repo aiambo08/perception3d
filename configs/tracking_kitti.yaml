@@ -1,0 +1,34 @@
+# Sintonía KITTI/producción: igual que tracking.yaml salvo dynamics.vehicle.q (barrido de 21
+# secuencias, docs/01_plan_fases_mvp.md F5). tracking.yaml (q=1) queda para el DoD sintético.
+# F5 · Tracking 3D (tracking/byte_tracker.py, tracking/kalman_filter.py, tracking/tracker3d.py)
+
+byte_track:
+  high_thresh: 0.5          # detecciones "altas": asociación primaria y nacimiento de tracks
+  low_thresh: 0.1           # detecciones "bajas": sólo recuperan tracks confirmados (IoU ≥ second_iou)
+  new_track_thresh: 0.6
+  match_iou: 0.2
+  second_iou: 0.5
+  min_hits: 2
+  max_lost_s: 1.0           # por tiempo, no por frames: el Δt es variable
+  accel_rel: 2.0            # ruido de aceleración de la caja por px de altura (1/s²)
+  meas_rel: 0.05            # σ de la caja = 5 % de su altura
+
+# CWNA: q en m²/s³ (Q = q·[[Δt³/3, Δt²/2], [Δt²/2, Δt]] por eje); σ_v0 = prior de velocidad sobre
+# el suelo al nacer el track. Claves = grupos de clase de byte_track.class_groups.
+dynamics:
+  vehicle: {q: 4.0, sigma_v0_mps: 15.0}
+  person: {q: 0.5, sigma_v0_mps: 3.0}
+  cycle: {q: 1.0, sigma_v0_mps: 8.0}
+  default: {q: 1.0, sigma_v0_mps: 15.0}
+
+filter:
+  gate_chi2: 13.82          # χ² 2 gdl 99.9 % sobre el NIS
+  robust_chi2: 5.99         # NIS > 5.99 → R·NIS/5.99 (Huber/IRLS): acota el efecto de saltos de profundidad; null = off
+  max_rejects: 3            # rechazos consecutivos → reinicialización desde la medida
+  r_scale: 1.0              # R ← r_scale·R de F4 (consistencia: NIS medio ≈ 2 en diagnostics.consistency)
+  static_below_mps: 1.0     # etiqueta de movimiento con histéresis (sólo con ego-motion real)
+  moving_above_mps: 2.0
+  motion_hold_s: 0.3
+  min_motion_age_s: 0.3
+  static_chi2: 5.99         # V sobre el suelo compatible con 0 (χ² 2 gdl 95 %) → candidato estático
+  moving_chi2: 13.82        # móvil: speed > moving_above_mps y 0 rechazado al 99.9 %

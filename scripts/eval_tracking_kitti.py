@@ -110,7 +110,7 @@ def main() -> int:
     )
     ap.add_argument("--camera", type=Path, default=ROOT / "configs" / "camera_kitti.yaml")
     ap.add_argument("--fusion", type=Path, default=ROOT / "configs" / "fusion.yaml")
-    ap.add_argument("--tracking", type=Path, default=ROOT / "configs" / "tracking.yaml")
+    ap.add_argument("--tracking", type=Path, default=ROOT / "configs" / "tracking_kitti.yaml")
     ap.add_argument("--models", type=Path, default=ROOT / "configs" / "models.yaml")
     ap.add_argument("--engine", type=Path, default=None, help="TensorRT depth engine")
     ap.add_argument("--depth-dir", type=Path, default=None, help="Pre-computed <frame>.npy maps")
