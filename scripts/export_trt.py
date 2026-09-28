@@ -41,8 +41,7 @@ def _build_engine(
         import tensorrt as trt  # noqa: PLC0415
     except ImportError as exc:
         print(
-            f"tensorrt not importable: {exc}\n"
-            "Install with: uv pip install -e '.[runtime]'",
+            f"tensorrt not importable: {exc}\nInstall with: uv pip install -e '.[runtime]'",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -94,7 +94,7 @@ def export_one(cfg: DepthModelConfig, hw: tuple[int, int], args: argparse.Namesp
     for out_info in raw.graph.output:
         tt = out_info.type.tensor_type
         if tt.HasField("shape") and len(tt.shape.dim) == len(expected_shape):
-            for dim, val in zip(tt.shape.dim, expected_shape):
+            for dim, val in zip(tt.shape.dim, expected_shape, strict=True):
                 dim.ClearField("dim_param")
                 dim.dim_value = val
     raw_hw = input_hw(raw)

@@ -116,6 +116,9 @@ class FusionConfig:
     sigma_col_px: float = 1.5
     net_rel_sigma: float = 0.05
     """Relative error of the network's inverse depth after affine correction (``k``)."""
+    net_age_sigma_mps: float = 5.0
+    """Extra 1-σ of ``Z_n`` per second of depth-map age (R6): the map belongs to an
+    earlier frame, so the object may have moved ``v·age`` since it was rendered."""
     z_min_m: float = 1.0
     z_max_m: float = 80.0
     """Operating range: the fused estimate is flagged ``OUT_OF_RANGE`` outside it."""
@@ -213,6 +216,7 @@ def load_fusion_config(path: Path | str) -> FusionConfig:
         sigma_row_px=float(noise.get("sigma_row_px", 1.5)),
         sigma_col_px=float(noise.get("sigma_col_px", 1.5)),
         net_rel_sigma=float(noise.get("net_rel_sigma", 0.05)),
+        net_age_sigma_mps=float(noise.get("net_age_sigma_mps", 5.0)),
         z_min_m=float(gates.get("z_min_m", 1.0)),
         z_max_m=float(gates.get("z_max_m", 80.0)),
         range_slack=float(gates.get("range_slack", 1.5)),
@@ -396,8 +400,15 @@ class MetricFuser:
         resize: DepthResize | None,
         affine: AffineState | None,
         flags: list[FusionFlag],
+        sample_boxes: NDArray[np.float64] | None = None,
+        age_s: float = 0.0,
     ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-        """``(ρ_n, σ_ρn, c_ρn)`` per box in inverse depth (``nan`` where gated); updates ``flags``."""
+        """``(ρ_n, σ_ρn, c_ρn)`` per box in inverse depth (``nan`` where gated); updates ``flags``.
+
+        ``sample_boxes`` (default ``b``) are the boxes used to read the map: with a
+        stale map they should be the boxes of the map's own frame. ``age_s`` inflates
+        ``σ_ρn`` by ``net_age_sigma_mps·age / Z²``.
+        """
         n = b.shape[0]
         rho = np.full(n, np.nan)
         sig = np.full(n, np.nan)
@@ -406,13 +417,14 @@ class MetricFuser:
             for i in range(n):
                 flags[i] |= FusionFlag.NET_UNAVAILABLE
             return rho, sig, c
-        occ = occlusion_matrix(b, self.cfg.border_margin_px)
+        sb = b if sample_boxes is None else sample_boxes
+        occ = occlusion_matrix(sb, self.cfg.border_margin_px)
         vals = np.full(n, np.nan)
         sig_d = np.full(n, np.nan)
         for i in range(n):
-            excl = b[occ[i]] if occ[i].any() else None
+            excl = sb[occ[i]] if occ[i].any() else None
             sample = sample_box(
-                inv_map, resize, b[i], self.cfg.sampling, thin=priors[i].thin, exclude_boxes=excl
+                inv_map, resize, sb[i], self.cfg.sampling, thin=priors[i].thin, exclude_boxes=excl
             )
             if sample is None:
                 flags[i] |= FusionFlag.NET_NO_SAMPLE
@@ -426,6 +438,9 @@ class MetricFuser:
             flags[i] |= FusionFlag.NET_BEYOND
         ok = np.isfinite(nd.z_m)
         rho[ok], sig[ok] = nd.inv_z[ok], nd.sigma_inv[ok]
+        if age_s > 0.0 and ok.any():
+            dz = self.cfg.net_age_sigma_mps * age_s
+            sig[ok] = np.hypot(sig[ok], dz / (nd.z_m[ok] * nd.z_m[ok]))
         # (s, t) were fitted on the road under the current pitch, so ρ_n carries the pitch
         # sensitivity of a ground contact at that depth: ∂ρ/∂θ = −(∂Z/∂θ)/Z² ≈ 1/h.
         if ok.any():
@@ -449,13 +464,25 @@ class MetricFuser:
         affine: AffineState | None,
         frame_id: int,
         t_ns: int,
+        net_boxes: NDArray[np.floating[Any]] | None = None,
+        net_age_s: float = 0.0,
     ) -> list[Measurement3D]:
+        """Fuse the three cues for every box of frame ``frame_id``.
+
+        ``net_boxes`` (same length as ``boxes``) are where the depth map is sampled
+        when it belongs to an earlier frame (R6); ``net_age_s`` is that map's age.
+        """
         b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
         n = b.shape[0]
         if len(classes) != n:
             raise ValueError(f"{n} boxes but {len(classes)} class names")
         if n == 0:
             return []
+        nb: NDArray[np.float64] | None = None
+        if net_boxes is not None:
+            nb = np.asarray(net_boxes, dtype=np.float64).reshape(-1, 4)
+            if nb.shape[0] != n:
+                raise ValueError(f"{n} boxes but {nb.shape[0]} net_boxes")
         cfg = self.cfg
         k = geometry.intrinsics
         h_cam = geometry.extrinsics.camera_height_m
@@ -489,7 +516,9 @@ class MetricFuser:
             flags[i] |= FusionFlag.GROUND_ABOVE_HORIZON
 
         # -- net cue ----------------------------------------------------------
-        rho_n, sig_n, c_n = self._net_cue(b, priors, geometry, inv_map, resize, affine, flags)
+        rho_n, sig_n, c_n = self._net_cue(
+            b, priors, geometry, inv_map, resize, affine, flags, nb, net_age_s
+        )
 
         # -- height cue -------------------------------------------------------
         h_trunc = (y0 <= m_px) | (y1 >= k.height - 1.0 - m_px)
@@ -698,17 +727,28 @@ class MetricFusionStage:
         boxes: NDArray[np.floating[Any]],
         classes: list[str],
         depth: DepthMap | None,
+        net_boxes: NDArray[np.floating[Any]] | None = None,
+        net_age_s: float | None = None,
     ) -> FusionOutput:
+        """Fuse frame ``frame_id``; ``net_boxes``/``net_age_s`` as in :meth:`MetricFuser.fuse`.
+
+        ``net_age_s`` defaults to ``t_ns − depth.t_capture_ns``.
+        """
         geo = self.geometry()
         b = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
         report: GroundSolverReport | None = None
         inv_map: NDArray[np.float32] | None = None
         resize: DepthResize | None = None
         lag = 0
+        age_s = 0.0
         if depth is not None:
             inv_map = depth.inverse_depth()
             resize = depth.resize
             lag = frame_id - depth.frame_id
+            if net_age_s is not None:
+                age_s = max(0.0, net_age_s)
+            else:
+                age_s = max(0.0, (t_ns - depth.t_capture_ns) * 1e-9)
             if self.timer is not None:
                 with self.timer.stage("fusion.solver"):
                     report = self.solver.update(inv_map, resize, geo, b, frame_id, t_ns)
@@ -717,9 +757,13 @@ class MetricFusionStage:
         affine = self.solver.state
         if self.timer is not None:
             with self.timer.stage("fusion.boxes"):
-                meas = self.fuser.fuse(b, classes, geo, inv_map, resize, affine, frame_id, t_ns)
+                meas = self.fuser.fuse(
+                    b, classes, geo, inv_map, resize, affine, frame_id, t_ns, net_boxes, age_s
+                )
         else:
-            meas = self.fuser.fuse(b, classes, geo, inv_map, resize, affine, frame_id, t_ns)
+            meas = self.fuser.fuse(
+                b, classes, geo, inv_map, resize, affine, frame_id, t_ns, net_boxes, age_s
+            )
         if self.online_pitch:
             th = np.array([m.pitch_meas_rad for m in meas], dtype=np.float64)
             sg = np.array([m.pitch_meas_sigma_rad for m in meas], dtype=np.float64)
