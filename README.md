@@ -141,7 +141,8 @@ Todo medido en el hardware objetivo: **RTX Ada 8 GB bajo WSL2**, KITTI tracking/
 > [!NOTE]
 > **Limitaciones conocidas.** El RMSE de velocidad global de F5 (≈ 1.10 m/s frente a 1.0) está limitado
 > por el error de rango de F4, correlado en el tiempo; el estado de sesgo de rango del Kalman
-> (`--range-bias`) está en evaluación. Todo lo medido es KITTI reproducido; falta validar con cámara real.
+> (`--range-bias`) se midió en 21 secuencias y no mejora (queda desactivado). Todo lo medido es
+> KITTI reproducido; falta validar con cámara real.
 > Detalle y decisiones en [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md).
 
 ## Inicio rápido
@@ -408,3 +409,4 @@ Grupos opcionales (`pyproject.toml`):
 |---|---|
 | [`docs/00_analisis_critico.md`](docs/00_analisis_critico.md) | Riesgos, trade-offs (latencia vs. precisión, memoria vs. robustez) y mitigaciones por etapa |
 | [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md) | Fases F0–F8, Definition of Done, estrategia de medición y resultados con sus decisiones |
+| [`docs/02_documento_tecnico.md`](docs/02_documento_tecnico.md) | Documento técnico completo: teoría (fórmulas, teoremas, referencias), diseño y relación con el código, fase a fase |
