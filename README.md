@@ -163,6 +163,13 @@ uv run python scripts/eval_tracking_kitti.py --root <kitti_tracking/training> \
     --seqs 0000 0001 0020 --ego oxts --json out/f5_kitti.json               # necesita training/oxts/
 ```
 
+El filtro de pitch en línea de F4 es robusto por defecto (`pitch_filter:` en
+`configs/fusion.yaml`: `robust_r`, `soft_gate`, `reset_after_gated`) y el pitch
+nominal de KITTI es 0°. `eval_fusion_kitti.py` y `eval_tracking_kitti.py` aceptan
+`--pitch-filter legacy --nominal-pitch-deg 2.5` para reproducir el filtro anterior;
+el JSON de F4 cuenta en `pitch.n_discarded` / `pitch.n_frames_gated` las medidas
+descartadas y los frames fuera del gate.
+
 Seguridad (F6):
 
 ```bash

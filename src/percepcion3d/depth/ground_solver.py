@@ -30,7 +30,7 @@ geometry per (resize, extrinsics) so the per-frame cost is the fit itself.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -47,6 +47,9 @@ _ANGLE_GUARD_RAD = 1e-4
 #: 99 % χ² quantiles for 2 and 1 degrees of freedom.
 CHI2_99_2DOF = 9.210
 CHI2_99_1DOF = 6.635
+_SPREAD_VAR_RATIO = 4.0
+"""MAD variance must exceed the formal one by this factor (2× in σ) to replace it:
+the MAD of a handful of objects is too noisy to override a consistent σ."""
 
 
 # ----------------------------------------------------------------------------
@@ -581,6 +584,16 @@ class PitchFilterConfig:
     min_objects: int = 1
     max_step_rad: float = float(np.deg2rad(3.0))
     """Measurements farther than this from the nominal pitch are discarded outright."""
+    robust_r: bool = True
+    """Floor the variance of the frame median with the spread (MAD) of the object pitches."""
+    soft_gate: bool = True
+    """Beyond the χ² gate, inflate R so the innovation sits on the gate instead of dropping it."""
+    reset_after_gated: int = 10
+    """Re-seed on the measurement after this many consecutive gated frames (0 = never)."""
+
+    def legacy(self) -> PitchFilterConfig:
+        """Pre-robust behaviour: formal median variance, hard gate, no reset."""
+        return replace(self, robust_r=False, soft_gate=False, reset_after_gated=0)
 
 
 @dataclass(frozen=True)
@@ -589,6 +602,12 @@ class PitchState:
     sigma_rad: float
     n_updates: int
     n_rejected: int
+    n_gated: int = 0
+    """Frames whose innovation exceeded the χ² gate (soft-weighted, hard-rejected or reset)."""
+    n_resets: int = 0
+    n_discarded_last: int = 0
+    """Finite measurements of the last frame dropped for lying beyond ``max_step_rad``."""
+    gated_last: bool = False
 
 
 class PitchEstimator:
@@ -602,10 +621,24 @@ class PitchEstimator:
         self._t_ns: int | None = None
         self._n = 0
         self._rej = 0
+        self._gated = 0
+        self._streak = 0
+        self._resets = 0
+        self._disc_last = 0
+        self._gated_last = False
 
     @property
     def state(self) -> PitchState:
-        return PitchState(self._x, float(np.sqrt(self._p)), self._n, self._rej)
+        return PitchState(
+            self._x,
+            float(np.sqrt(self._p)),
+            self._n,
+            self._rej,
+            n_gated=self._gated,
+            n_resets=self._resets,
+            n_discarded_last=self._disc_last,
+            gated_last=self._gated_last,
+        )
 
     def extrinsics(self) -> ExtrinsicMountConfig:
         return ExtrinsicMountConfig(
@@ -620,18 +653,28 @@ class PitchEstimator:
         sigma_rad: NDArray[np.floating[Any]],
         t_ns: int,
     ) -> PitchState:
-        """Fuse one frame of per-object pitch measurements (``nan`` entries are skipped)."""
+        """Fuse one frame of per-object pitch measurements (``nan`` entries are skipped).
+
+        The frame median ``z`` has variance ``π/2 / Σw`` if the per-object σ are right; with
+        ``robust_r`` it is replaced by ``π/2 · σ_MAD² / n`` when that is clearly larger, because the object pitches scatter
+        far more than their σ (road slope under each object, class-height spread). An
+        innovation beyond the gate is down-weighted (``soft_gate``) rather than dropped, and
+        ``reset_after_gated`` consecutive gated frames re-seed the filter on ``z``: a hard gate
+        plus a confident state can otherwise lock out a genuine change for seconds."""
+        cfg = self.cfg
         if self._t_ns is not None:
             dt = max((t_ns - self._t_ns) * 1e-9, 0.0)
-            self._p += self.cfg.q_rad_per_sqrt_s**2 * dt
+            self._p += cfg.q_rad_per_sqrt_s**2 * dt
         self._t_ns = t_ns
+        self._gated_last = False
         th = np.asarray(theta_rad, dtype=np.float64).ravel()
         sg = np.asarray(sigma_rad, dtype=np.float64).ravel()
-        ok = np.isfinite(th) & np.isfinite(sg) & (sg > 0)
-        ok &= np.abs(th - self.nominal.pitch_rad) <= self.cfg.max_step_rad
+        valid = np.isfinite(th) & np.isfinite(sg) & (sg > 0)
+        ok = valid & (np.abs(th - self.nominal.pitch_rad) <= cfg.max_step_rad)
+        self._disc_last = int(valid.sum() - ok.sum())
         th, sg = th[ok], sg[ok]
         n = int(th.shape[0])
-        if n < self.cfg.min_objects:
+        if n < cfg.min_objects or n == 0:
             return self.state
         if n == 1:
             z, r = float(th[0]), float(sg[0] ** 2)
@@ -641,11 +684,31 @@ class PitchEstimator:
             cw = np.cumsum(w[order])
             z = float(th[order][np.searchsorted(cw, 0.5 * cw[-1])])
             r = float(np.pi / 2.0 / w.sum())
+            if cfg.robust_r:
+                sigma_mad = 1.4826 * float(np.median(np.abs(th - z)))
+                r_mad = float(np.pi / 2.0 * sigma_mad**2 / n)
+                if r_mad > _SPREAD_VAR_RATIO * r:
+                    r = r_mad
         nu = z - self._x
         s = self._p + r
-        if nu * nu / s > self.cfg.chi2_gate:
-            self._rej += 1
-            return self.state
+        if nu * nu / s > cfg.chi2_gate:
+            self._gated += 1
+            self._gated_last = True
+            self._streak += 1
+            if cfg.reset_after_gated > 0 and self._streak >= cfg.reset_after_gated:
+                self._x = z
+                self._p = max(r, float(cfg.sigma0_rad**2))
+                self._streak = 0
+                self._resets += 1
+                self._n += 1
+                return self.state
+            if not cfg.soft_gate:
+                self._rej += 1
+                return self.state
+            r = nu * nu / cfg.chi2_gate - self._p
+            s = self._p + r
+        else:
+            self._streak = 0
         k = self._p / s
         self._x += k * nu
         self._p *= 1.0 - k

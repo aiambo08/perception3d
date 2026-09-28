@@ -480,10 +480,20 @@ velocidad relativa sin cumplir en tráfico urbano: RMSE 0–30 m de 1.22 m/s en
 ≥ 98.8 % ✔; 0 ID switches con cajas GT ✔; `Tracker3D.step` P95 0.58–0.61 ms ✔.
 El sesgo de $+0.9$ m/s en $V_Z$ es un error sistemático del cue de suelo de F4
 (pitch), no del tracker, y F6 lo absorbe con cotas conservadoras
-($TTC_{low}$ con $-\dot Z + k\sigma_{\dot Z}$). Corrección pendiente en F4
-(no iniciada): pitch nominal KITTI ≈ 0°, varianza de medida robusta
-(máx. de la fórmula y la MAD de los pitches por objeto), gate suave con reinicio
-tras N rechazos y conteo de rechazos en el JSON.
+($TTC_{low}$ con $-\dot Z + k\sigma_{\dot Z}$).
+
+**Corrección del filtro de pitch (implementada; pendiente de medir en KITTI).**
+(1) `configs/camera_kitti.yaml` pasa el pitch nominal de 2.5° a 0°, de modo que
+`max_step_deg` = 3° ya no recorta el lado bajo; (2) `robust_r`: la varianza de la
+mediana se sustituye por $\pi/2\cdot\sigma_{MAD}^2/n$ cuando supera 4× la formal
+$\pi/2/\sum w$; (3) `soft_gate`: fuera del gate $\chi^2$ se infla $R$ (Huber) en
+vez de descartar, y `reset_after_gated` = 10 frames seguidos fuera del gate
+reinician el filtro en la medida; (4) `pitch_series` y `pitch` del JSON de F4
+cuentan por frame las medidas descartadas (`n_discarded`) y si el frame quedó
+fuera del gate (`gated`). `--pitch-filter legacy --nominal-pitch-deg 2.5`
+reproduce el comportamiento anterior para A/B. En simulación (paseo aleatorio,
+escalón de −1.5°, dispersión 1° entre objetos, 10 % de atípicos) el RMSE del
+pitch baja de 0.47–1.01° a 0.32–0.70°; los DoD sintéticos de F4 siguen cumpliéndose.
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
@@ -492,6 +502,12 @@ uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --
     --json reports/f5_kitti.json                                   # sin red: suelo + altura
 uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
     --engine models/depth_924x280_fp16.engine --boxes detector --json reports/f5_kitti_det.json
+# A/B de la corrección del filtro de pitch (con red, cajas GT):
+uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
+    --engine models/depth_924x280_fp16.engine --pitch-filter legacy --nominal-pitch-deg 2.5 \
+    --json reports/f5_kitti_pitch_legacy.json
+uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
+    --engine models/depth_924x280_fp16.engine --json reports/f5_kitti_pitch_robust.json
 ```
 
 ---

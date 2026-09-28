@@ -482,6 +482,87 @@ def test_pitch_from_contact_inverts_geometry_and_estimator_converges(geo: Pinhol
     assert est.state.n_updates == n_before  # beyond max_step → discarded
 
 
+def _level_pitch_estimator(cfg: PitchFilterConfig, pitch_deg: float) -> PitchEstimator:
+    return PitchEstimator(replace(EXTR, pitch_rad=float(np.deg2rad(pitch_deg))), cfg)
+
+
+def test_pitch_filter_robust_r_uses_object_spread() -> None:
+    """Objects scattered by ±1° but each claiming σ = 0.05°: only the MAD floor keeps the
+    filter from becoming over-confident after a single frame."""
+    rng = np.random.default_rng(11)
+    meas = np.deg2rad(rng.normal(0.0, 1.0, 9))
+    sig = np.full(9, np.deg2rad(0.05))
+    robust = _level_pitch_estimator(PitchFilterConfig(), 0.0)
+    legacy = _level_pitch_estimator(PitchFilterConfig().legacy(), 0.0)
+    robust.update(meas, sig, 0)
+    legacy.update(meas, sig, 0)
+    assert np.rad2deg(legacy.state.sigma_rad) < 0.03
+    assert np.rad2deg(robust.state.sigma_rad) > 0.3
+
+
+def test_pitch_filter_hard_gate_locks_out_step_soft_gate_and_reset_recover() -> None:
+    """A confident filter at 1.9° facing a genuine step to 0° (KITTI 0001, frames 108–128):
+    the hard gate rejects every frame; soft gating or a reset alone both recover."""
+    sig = np.full(6, np.deg2rad(0.05))
+    ests = {
+        "robust": _level_pitch_estimator(PitchFilterConfig(), 0.0),
+        "legacy": _level_pitch_estimator(PitchFilterConfig().legacy(), 0.0),
+        "reset_only": _level_pitch_estimator(
+            replace(PitchFilterConfig().legacy(), reset_after_gated=5), 0.0
+        ),
+    }
+    rng = np.random.default_rng(12)
+    for est in ests.values():
+        for i in range(60):
+            est.update(np.deg2rad(1.9 + rng.normal(0.0, 0.05, 6)), sig, i * 100_000_000)
+        assert np.rad2deg(est.state.pitch_rad) == pytest.approx(1.9, abs=0.05)
+        for i in range(60, 80):
+            est.update(np.deg2rad(rng.normal(0.0, 0.05, 6)), sig, i * 100_000_000)
+    leg, rob, rst = (ests[k].state for k in ("legacy", "robust", "reset_only"))
+    assert np.rad2deg(leg.pitch_rad) > 1.5 and leg.n_rejected >= 15
+    assert abs(np.rad2deg(rob.pitch_rad)) < 0.1
+    assert rob.n_rejected == 0 and rob.n_gated >= 1 and not rob.gated_last
+    assert abs(np.rad2deg(rst.pitch_rad)) < 0.1 and rst.n_resets >= 1
+
+
+def test_pitch_filter_reports_discarded_measurements_and_loads_config() -> None:
+    est = _level_pitch_estimator(PitchFilterConfig(), 0.0)
+    th = np.deg2rad(np.array([0.2, -0.1, 4.0, -3.5, np.nan]))
+    st = est.update(th, np.full(5, np.deg2rad(0.3)), 0)
+    assert st.n_discarded_last == 2 and st.n_updates == 1
+    st = est.update(th[:2], np.full(2, np.deg2rad(0.3)), 100_000_000)
+    assert st.n_discarded_last == 0
+    _, _, pit = load_solver_configs(Path("configs/fusion.yaml"))
+    assert pit.robust_r and pit.soft_gate and pit.reset_after_gated == 10
+    leg = pit.legacy()
+    assert not leg.robust_r and not leg.soft_gate and leg.reset_after_gated == 0
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_pitch_filter_random_walk_with_outliers_beats_legacy(seed: int) -> None:
+    """Random-walk pitch with a −1.5° step, objects scattered by 1° (claiming 0.1°) and 10 %
+    of them 2.5° off: the robust filter tracks with a lower RMS error than the legacy one."""
+
+    def rms_err(cfg: PitchFilterConfig) -> float:
+        rng = np.random.default_rng(seed)
+        est = _level_pitch_estimator(cfg, 0.0)
+        true = float(np.deg2rad(0.5))
+        err = []
+        for i in range(300):
+            true += float(rng.normal(0.0, np.deg2rad(0.3) * np.sqrt(0.1)))
+            if i == 150:
+                true -= float(np.deg2rad(1.5))
+            m = true + rng.normal(0.0, np.deg2rad(1.0), 6)
+            m[rng.random(6) < 0.1] += np.deg2rad(2.5)
+            est.update(m, np.full(6, np.deg2rad(0.1)), i * 100_000_000)
+            err.append(est.state.pitch_rad - true)
+        return float(np.rad2deg(np.sqrt(np.mean(np.square(err)))))
+
+    robust, legacy = rms_err(PitchFilterConfig()), rms_err(PitchFilterConfig().legacy())
+    assert robust < legacy
+    assert robust < 0.8
+
+
 def test_fit_plane_recovers_pitch_and_height(geo: PinholeGeometry) -> None:
     rng = np.random.default_rng(6)
     grid = GroundGrid.build(geo, RESIZE)
