@@ -76,6 +76,11 @@ class TrackingScenario:
     """``true`` (exact ego-motion) or ``zero``."""
     rel_sigma_z: float = 0.05
     sigma_col_px: float = 1.5
+    range_bias_sigma: float = 0.0
+    """Per-object Gauss-Markov range-scale error ``b`` (F4 drift): ``z = (1 + b)·p + w``.
+    The reported covariance covers the total error (``σ_Z² = (rel_sigma_z² + σ_b²)·Z²``),
+    as F4's σ does, so the white part is overstated — the KITTI signature NIS ≪ 2."""
+    range_bias_tau_s: float = 2.0
     box_px: float = 1.5
     score_after_s: float = 1.0
     bin_m: tuple[float, float] = (10.0, 20.0)
@@ -192,7 +197,14 @@ def run_tracking_scenario(
     fx = geo.intrinsics.fx
     last_tid: dict[int, int] = {}
     birth: dict[int, float] = {}
+    bias = {o.obj_id: rng.normal(0.0, sc.range_bias_sigma) for o in sc.objects}
+    t_prev = 0.0
     for t in _timestamps(sc, rng):
+        if sc.range_bias_sigma > 0.0:
+            a = float(np.exp(-(t - t_prev) / sc.range_bias_tau_s))
+            sd = sc.range_bias_sigma * float(np.sqrt(1.0 - a * a))
+            bias = {k: a * b + rng.normal(0.0, sd) for k, b in bias.items()}
+        t_prev = float(t)
         pos_e, psi = _ego_pose(float(t), sc.ego_speed_mps, sc.ego_yaw_rate_rps)
         rt = rotation_2d(psi).T
         v_ego_w = sc.ego_speed_mps * np.array([-np.sin(psi), np.cos(psi)])
@@ -206,7 +218,11 @@ def run_tracking_scenario(
             sz = sc.rel_sigma_z * p[1]
             sx = float(np.hypot(abs(p[0]) / p[1] * sz, p[1] * sc.sigma_col_px / fx))
             cov = position_covariance(float(p[0]), float(p[1]), sx, sz)
-            zm = rng.multivariate_normal(p, cov)
+            zm = (1.0 + bias[o.obj_id]) * rng.multivariate_normal(p, cov)
+            if sc.range_bias_sigma > 0.0:
+                sz = float(np.hypot(sz, sc.range_bias_sigma * p[1]))
+                sx = float(np.hypot(abs(p[0]) / p[1] * sz, p[1] * sc.sigma_col_px / fx))
+                cov = position_covariance(float(p[0]), float(p[1]), sx, sz)
             t_ns = int(round(t * 1e9))
             boxes.append(box + rng.normal(0.0, sc.box_px, 4))
             classes.append(o.cls)

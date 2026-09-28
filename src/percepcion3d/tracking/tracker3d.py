@@ -31,7 +31,13 @@ from numpy.typing import NDArray
 from percepcion3d.depth.fusion import Measurement3D
 from percepcion3d.tracking.byte_tracker import ByteTrackConfig, ByteTracker, TrackState
 from percepcion3d.tracking.ego_motion import EgoMotionProvider, ZeroEgoMotion
-from percepcion3d.tracking.kalman_filter import CvKalman, EgoDelta, predict_batch, update_batch
+from percepcion3d.tracking.kalman_filter import (
+    CvKalman,
+    EgoDelta,
+    RangeBias,
+    predict_batch,
+    update_batch,
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,8 @@ class Tracker3DConfig:
     max_rejects: int = 3
     r_scale: float = 1.0
     """Multiplier of every measurement covariance from F4 (``R ← r_scale·R``)."""
+    range_bias: RangeBias | None = None
+    """Estimate a per-track Gauss-Markov range-scale bias (5-state filter); ``None`` = off."""
     static_below_mps: float = 1.0
     moving_above_mps: float = 2.0
     static_chi2: float = 5.99
@@ -132,8 +140,14 @@ def load_tracker_config(path: Path | str) -> Tracker3DConfig:
     dyn_raw: dict[str, dict[str, float]] = raw.get("dynamics", {})
     dyn = {k: ClassDynamics(**v) for k, v in dyn_raw.items()}
     default = dyn.pop("default", ClassDynamics(q=1.0, sigma_v0_mps=15.0))
+    flt: dict[str, Any] = dict(raw.get("filter", {}))
+    rb = flt.pop("range_bias", None)
     return Tracker3DConfig(
-        dynamics=dyn, default_dynamics=default, byte=byte, **dict(raw.get("filter", {}))
+        dynamics=dyn,
+        default_dynamics=default,
+        byte=byte,
+        range_bias=RangeBias(**rb) if rb else None,
+        **flt,
     )
 
 
@@ -152,13 +166,16 @@ class Track3D:
     velocity_abs_xz: NDArray[np.float64]
     """Over-ground velocity; equals ``velocity_rel_xz`` with a non-absolute ego provider."""
     cov: NDArray[np.float64]
-    """4×4 state covariance ``[X, Z, V_X, V_Z]`` (over-ground velocity block)."""
+    """4×4 covariance of ``[X, Z, V_X, V_Z]`` (over-ground velocity block; any bias state
+    is marginalised out)."""
     cov_vel_rel: NDArray[np.float64]
     age_s: float
     n_updates: int
     time_since_update_s: float
     motion: MotionState
     last_nis: float
+    range_bias: float = float("nan")
+    """Estimated range-scale bias ``b`` (``nan`` when the filter has no bias state)."""
 
 
 @dataclass
@@ -187,7 +204,14 @@ class Tracker3D:
 
     def _init(self, m: PositionMeasurement, cls: str, t_ns: int) -> _Track3DState:
         d = self.cfg.dynamics_for(cls)
-        kf = CvKalman(m.xz, self.cfg.r_scale * m.cov, m.t_ns, d.q, d.sigma_v0_mps)
+        kf = CvKalman(
+            m.xz,
+            self.cfg.r_scale * m.cov,
+            m.t_ns,
+            d.q,
+            d.sigma_v0_mps,
+            range_bias=self.cfg.range_bias,
+        )
         if m.t_ns < t_ns:
             kf.predict(t_ns, None)
         return _Track3DState(kf, t_ns, t_ns)
@@ -244,6 +268,8 @@ class Tracker3D:
                 np.array([(t_ns - k.t_ns) * 1e-9 for k in kfs]),
                 np.array([k.q for k in kfs]),
                 ego,
+                0.0 if self.cfg.range_bias is None else self.cfg.range_bias.sigma,
+                1.0 if self.cfg.range_bias is None else self.cfg.range_bias.tau_s,
             )
             for i, k in enumerate(kfs):
                 k.x, k.P, k.t_ns = x[i], p[i], t_ns
@@ -296,15 +322,16 @@ class Tracker3D:
                     box=box,
                     det_index=tr.det_index,
                     position_xz=kx[:2].copy(),
-                    velocity_rel_xz=kx[2:] - v_ego,
-                    velocity_abs_xz=kx[2:].copy(),
-                    cov=kp.copy(),
-                    cov_vel_rel=kp[2:, 2:] + var_ego,
+                    velocity_rel_xz=kx[2:4] - v_ego,
+                    velocity_abs_xz=kx[2:4].copy(),
+                    cov=kp[:4, :4].copy(),
+                    cov_vel_rel=kp[2:4, 2:4] + var_ego,
                     age_s=(t_ns - st.t_birth_ns) * 1e-9,
                     n_updates=st.n_updates,
                     time_since_update_s=(t_ns - st.t_update_ns) * 1e-9,
                     motion=st.motion,
                     last_nis=st.last_nis,
+                    range_bias=st.kf.bias,
                 )
             )
         return out

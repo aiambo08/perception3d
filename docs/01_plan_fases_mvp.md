@@ -604,6 +604,25 @@ aceptada, atribuida a F4.
 `configs/tracking.yaml` mantiene q = 1 para el DoD sintético: allí los objetos van a velocidad
 constante, y con q = 4 el escenario con jitter de Δt sube de 0.40 a 0.61 m/s (límite 0.5).
 
+**Estado de sesgo de rango (opcional, `filter.range_bias`, desactivado por defecto).** KF de
+5 estados `[X, Z, V_X, V_Z, b]` con medida `z = (1+b)·(p − V·lag)` (EKF) y `b`
+Gauss-Markov (`sigma`, `tau_s`). Simulación (`TrackingScenario.range_bias_sigma`, error
+blanco 2 % + deriva 5 % con τ = 2 s, σ declarada = total como en F4, 4 semillas):
+
+| | RMSE V_Z | NEES medio (ideal 4) |
+|---|---|---|
+| q 1 (base) | 0.85 m/s | 19.7 |
+| q 1 + sesgo (0.05, 2 s) | 0.79 m/s | 3.2 |
+| q 4 / q 4 + sesgo | 1.02 / 0.95 m/s | 15.1 / 3.0 |
+
+Recupera la consistencia del filtro pero mejora poco el RMSE (≈ 7 %): con un solo
+track a velocidad constante un sesgo de escala constante no es observable (sólo se fija
+`(1+b)(V − v_ego)`), así que el estado sólo separa la parte de la deriva que decorrela
+en τ. Si el error de F4 es común a todos los objetos de un frame (escala del ajuste
+afín), un sesgo **compartido** por frame sería observable con los objetos estáticos; el
+diagnóstico `range_error` del JSON (`frame_share`, autocorrelación por desfase) decide
+entre ambas rutas. Barrido KITTI: `--range-bias SIGMA TAU_S`.
+
 ---
 
 ## F6 · Cinemática y seguridad — ✔ implementado (CPU)

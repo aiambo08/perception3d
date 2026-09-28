@@ -146,6 +146,8 @@ DIAG_BINS_M: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 60.0)
 DIAG_ACCEL_BINS: tuple[float, ...] = (-math.inf, -1.5, -0.5, 0.5, 1.5, math.inf)
 DIAG_AGE_BINS_S: tuple[float, ...] = (1.0, 2.0, 4.0, math.inf)
 TURN_YAW_RATE_RPS = 0.05
+RANGE_ERR_LAGS: tuple[int, ...] = (1, 5, 10, 20)
+"""Lags (frames; KITTI runs at 10 Hz) of the range-error autocorrelation."""
 _DRIFT_HALF_WINDOW = 2
 
 
@@ -194,6 +196,9 @@ class TrackingKittiResult:
     filter_diag: list[tuple[float, float, float]] = field(default_factory=list)
     """``(NIS of the last update, predicted σ of relative V_Z, n_updates)`` per ``diag``
     sample."""
+    range_diag: list[tuple[float, float, float, float]] = field(default_factory=list)
+    """``(frame, gt_track_id, (Z_meas − Z_gt)/Z_gt, estimated bias b)`` per matched F4
+    measurement (any age; ``b`` is ``nan`` without a bias state)."""
     id_switches: int = 0
     n_gt_ids: int = 0
     n_matches: int = 0
@@ -246,6 +251,10 @@ class TrackingKittiResult:
             out["turn"] = self._turn_diagnostics(d)
         if self.filter_diag and len(self.filter_diag) == d.shape[0]:
             out["consistency"] = self._consistency(d)
+        if self.range_diag:
+            out["range_error"] = range_error_structure(
+                np.asarray(self.range_diag, dtype=np.float64).reshape(-1, 4)
+            )
         return out
 
     def _consistency(self, d: NDArray[np.float64]) -> dict[str, Any]:
@@ -363,6 +372,52 @@ def _range_drift_rate(
     return out
 
 
+def range_error_structure(
+    r: NDArray[np.float64], lags: Sequence[int] = RANGE_ERR_LAGS
+) -> dict[str, Any]:
+    """Structure of the relative range error of the F4 measurements (rows of
+    ``range_diag``): how much of it is shared by all objects of a frame
+    (``frame_share``, ≈ 1 ⇒ one global scale error per frame) and how slowly it decorrelates
+    along a track (``autocorr_by_lag_frames``, about the global mean). A white-noise ``R``
+    needs both ≈ 0; a slow per-track correlation is what ``filter.range_bias`` models."""
+    frame, tid, e, b = r[:, 0], r[:, 1], r[:, 2], r[:, 3]
+    m = np.isfinite(e)
+    frame, tid, e, b = frame[m], tid[m], e[m], b[m]
+    if e.size < 3:
+        return {"n": int(e.size)}
+    mu, var = float(e.mean()), float(e.var())
+    out: dict[str, Any] = {
+        "n": int(e.size),
+        "mean_rel": mu,
+        "rms_rel": float(np.sqrt(np.mean(e**2))),
+    }
+    _, inv, cnt = np.unique(frame, return_inverse=True, return_counts=True)
+    multi = cnt[inv] >= 2
+    if multi.sum() >= 3 and var > 0.0:
+        sums = np.bincount(inv, weights=e, minlength=cnt.size)
+        fmean = sums[inv] / cnt[inv]
+        within = np.sum(((e - fmean) ** 2)[multi]) / np.sum((cnt[inv] - 1)[multi] / cnt[inv][multi])
+        tot = float(np.var(e[multi]))
+        out["frame_share"] = float(1.0 - within / tot) if tot > 0.0 else float("nan")
+        out["n_frames_multi"] = int(np.unique(frame[multi]).size)
+    key = {(int(t), int(f)): v for t, f, v in zip(tid, frame, e, strict=True)}
+    ac: dict[str, Any] = {}
+    for lag in lags:
+        prs = [(v, key[(t, f + lag)]) for (t, f), v in key.items() if (t, f + lag) in key]
+        if len(prs) >= 3 and var > 0.0:
+            a = np.asarray(prs, dtype=np.float64) - mu
+            ac[str(lag)] = {"n": len(prs), "rho": float(np.mean(a[:, 0] * a[:, 1]) / var)}
+    out["autocorr_by_lag_frames"] = ac
+    fb = np.isfinite(b)
+    if fb.sum() >= 3:
+        out["bias_estimate"] = {
+            "n": int(fb.sum()),
+            "corr_with_error": float(np.corrcoef(b[fb], e[fb])[0, 1]),
+            "rms_error_minus_bias": float(np.sqrt(np.mean((e[fb] - b[fb]) ** 2))),
+        }
+    return out
+
+
 def merge_results(results: Sequence[TrackingKittiResult]) -> TrackingKittiResult:
     """Pool the per-sample diagnostics of several sequences (``diagnostics()`` only).
 
@@ -370,7 +425,11 @@ def merge_results(results: Sequence[TrackingKittiResult]) -> TrackingKittiResult
     sequence."""
     out = TrackingKittiResult()
     offset = 0.0
+    r_frame = r_tid = 0.0
     for r in results:
+        out.range_diag.extend((f + r_frame, t + r_tid, e, b) for f, t, e, b in r.range_diag)
+        r_frame += max((x[0] for x in r.range_diag), default=0.0) + 1e6
+        r_tid += max((x[1] for x in r.range_diag), default=0.0) + 1.0
         out.diag.extend(r.diag)
         if len(r.turn_diag) == len(r.diag):
             out.turn_diag.extend((*t[:5], t[5] + offset) for t in r.turn_diag)
@@ -436,6 +495,16 @@ def run_tracking_kitti(
             k = gt.get((fs.frame_id, lab.track_id))
             if k is None:
                 continue
+            mz = meas[tr.det_index]
+            if mz is not None and k.z_m > 0.0:
+                res.range_diag.append(
+                    (
+                        float(fs.frame_id),
+                        float(lab.track_id),
+                        (mz.z_m - k.z_m) / k.z_m,
+                        tr.range_bias,
+                    )
+                )
             if (
                 k.v_abs_mps is not None
                 and k.v_abs_mps < static_below_mps
