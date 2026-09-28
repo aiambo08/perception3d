@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import astuple
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from percepcion3d.eval.kitti import KittiTrackLabel
 from percepcion3d.eval.tracking_kitti import (
     TrackingKittiResult,
     gt_kinematics,
+    merge_results,
     run_tracking_kitti,
 )
 from percepcion3d.eval.tracking_synthetic import (
@@ -27,7 +29,12 @@ from percepcion3d.io.sources import OxtsRecord
 from percepcion3d.runtime.buffer import FrameStamped
 from percepcion3d.sim.synthetic import SyntheticNoise, SyntheticObject, SyntheticScene
 from percepcion3d.tracking.byte_tracker import ByteTrackConfig, ByteTracker, TrackState
-from percepcion3d.tracking.ego_motion import ConstantEgoMotion, OxtsEgoMotion, ZeroEgoMotion
+from percepcion3d.tracking.ego_motion import (
+    ConstantEgoMotion,
+    OxtsEgoMotion,
+    ZeroEgoMotion,
+    resample_oxts,
+)
 from percepcion3d.tracking.kalman_filter import (
     CvKalman,
     cv_transition,
@@ -412,6 +419,93 @@ def test_tracking_kitti_diagnostics_bins_stats_and_rates() -> None:
     assert d["idsw_per_100_matches"] == pytest.approx(2.0)
     assert d["tracker_ms_p50_p95_p99"] == pytest.approx([0.5] * 3)
     assert d["fusion_ms_p50_p95_p99"] == pytest.approx([2.0] * 3)
+
+
+def test_resample_oxts_offset_clamps_and_unwraps_yaw() -> None:
+    t = [0, 100 * MS, 200 * MS]
+    recs = [_oxts(10.0, wu=0.0), _oxts(12.0, wu=0.2), _oxts(14.0, wu=0.4)]
+    yaw = [math.pi - 0.05, -math.pi + 0.05, -math.pi + 0.15]
+    recs = [OxtsRecord(*[y if j == 5 else v for j, v in enumerate(astuple(r))]) for r, y in zip(recs, yaw, strict=True)]  # fmt: skip
+    out = resample_oxts(recs, t, 50 * MS)
+    assert [r.vf for r in out] == pytest.approx([11.0, 13.0, 14.0])  # last one clamped
+    assert [r.wu for r in out] == pytest.approx([0.1, 0.3, 0.4])
+    assert abs(out[0].yaw) == pytest.approx(math.pi)  # through the ±π wrap, not through 0
+    same = resample_oxts(recs, t, 0)
+    assert np.allclose([astuple(r) for r in same], [astuple(r) for r in recs])
+    with pytest.raises(ValueError):
+        resample_oxts(recs, t[:2], 0)
+
+
+def test_gt_translational_velocity_of_static_object_seen_while_turning() -> None:
+    """A static world point seen from a camera on a left arc has ``v_rel = −v_cam``: the
+    ``ω·(−Z, X)`` term cancels the apparent rotation (sign check of the GT reference)."""
+    geo = PinholeGeometry(INTR, EXTR)
+    v, w, fps = 8.0, 0.3, 10.0
+    world = np.array([5.0, 20.0])
+    labels: dict[int, list[KittiTrackLabel]] = {}
+    for f in range(7):
+        psi = w * f / fps
+        pos = np.array([v / w * (np.cos(psi) - 1.0), v / w * np.sin(psi)])
+        p = rotation_2d(psi).T @ (world - pos)
+        labels[f] = [
+            KittiTrackLabel(f, 1, "Car", 0.0, 0, 0.0, (0, 0, 100, 60), (1.5, 1.8, 4.2),
+                            (float(p[0]), 1.65, float(p[1])), math.pi / 2)
+        ]  # fmt: skip
+    k = gt_kinematics(labels, geo, [_oxts(v, wu=w)] * 7, half_window=1, fps=fps)[(3, 1)]
+    assert k.v_rel_xz is not None
+    assert k.v_rel_xz == pytest.approx((0.0, -v), abs=0.05)
+    assert k.v_abs_mps is not None and k.v_abs_mps < 0.05
+    assert abs(k.v_app_xz[1] + v) > 1.0  # the apparent velocity alone is off by ω·X
+
+
+def test_turn_diagnostics_separate_rotation_term_and_range_drift() -> None:
+    res = TrackingKittiResult()
+    # left turn, track 1: range error grows 0.1 m/frame (1 m/s) → V_Z bias fully explained
+    for f in range(5):
+        res.diag.append((0.0, 1.0, 15.0, 0.1, 0.0, 0.0, -5.0, 8.0, 0.0, 2.0))
+        res.turn_diag.append((0.1, 2.0, 0.0, 0.1 * f, float(f), 1.0))
+    # right turn, track 2: no range drift, V_Z error = ω·X (missing rotation term)
+    for f, x in enumerate((-4.0, -2.0, 0.0, 2.0, 4.0)):
+        res.diag.append((0.0, -0.2 * x, 15.0, 0.2, 0.0, 0.0, -5.0, 8.0, 0.0, 2.0))
+        res.turn_diag.append((-0.2, x, 0.0, 0.5, float(f), 2.0))
+    # straight, track 3
+    for f in range(3):
+        res.diag.append((0.0, 0.0, 20.0, 0.0, 0.0, 0.0, -5.0, 8.0, 0.0, 2.0))
+        res.turn_diag.append((0.0, 1.0, 0.0, -1.0, float(f), 3.0))
+    t = res.diagnostics()["turn"]
+    d = t["by_turn_direction"]
+    assert [d[k]["n"] for k in ("left", "straight", "right")] == [5, 3, 5]
+    assert d["left"]["n_drift"] == 3  # central difference needs both neighbours
+    assert d["left"]["mean_dez_dt_mps"] == pytest.approx(1.0)
+    assert d["left"]["vz_err_minus_range_drift"] == pytest.approx(0.0, abs=1e-9)
+    assert d["right"]["mean_dez_dt_mps"] == pytest.approx(0.0)
+    assert d["right"]["mean_ez_m"] == pytest.approx(0.5)
+    assert d["right"]["mean_ez_rel"] == pytest.approx(0.5 / 15.0)
+    assert d["straight"]["mean_ez_rel"] == pytest.approx(-0.05)
+    right_only = TrackingKittiResult(diag=res.diag[5:10], turn_diag=res.turn_diag[5:10])
+    fit = right_only.diagnostics()["turn"]["vz_err_vs_omega_x"]
+    assert fit["slope"] == pytest.approx(1.0) and fit["resid_rms"] < 1e-9
+
+
+def test_turn_diagnostics_absent_without_oxts_and_merge_keeps_tracks_apart() -> None:
+    nan = float("nan")
+    a = TrackingKittiResult(
+        diag=[(0.0, 0.0, 10.0, nan, 0.0, 0.0, 0.0, nan, 0.0, 2.0)],
+        turn_diag=[(nan, 1.0, 0.0, 0.0, 0.0, 1.0)],
+    )
+    assert "turn" not in a.diagnostics()
+    b = TrackingKittiResult(
+        diag=[(0.0, 1.0, 10.0, 0.1, 0.0, 0.0, 0.0, 8.0, 0.0, 2.0)] * 3,
+        turn_diag=[(0.1, 1.0, 0.0, 0.1 * f, float(f), 1.0) for f in range(3)],
+    )
+    c = TrackingKittiResult(
+        diag=[(0.0, 1.0, 10.0, 0.1, 0.0, 0.0, 0.0, 8.0, 0.0, 2.0)] * 3,
+        turn_diag=[(0.1, 1.0, 0.0, 5.0 - f, float(f), 1.0) for f in range(3)],
+    )
+    m = merge_results([b, c])
+    assert len(m.diag) == 6 and {t[5] for t in m.turn_diag} == {1.0, 3.0}
+    left = m.diagnostics()["turn"]["by_turn_direction"]["left"]
+    assert left["n_drift"] == 2 and left["mean_dez_dt_mps"] == pytest.approx((1.0 - 10.0) / 2)
 
 
 def test_update_batch_robust_bounds_outlier_pull() -> None:

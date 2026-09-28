@@ -482,7 +482,7 @@ El sesgo de $+0.9$ m/s en $V_Z$ es un error sistemático del cue de suelo de F4
 (pitch), no del tracker, y F6 lo absorbe con cotas conservadoras
 ($TTC_{low}$ con $-\dot Z + k\sigma_{\dot Z}$).
 
-**Corrección del filtro de pitch (implementada; pendiente de medir en KITTI).**
+**Corrección del filtro de pitch (implementada y medida).**
 (1) `configs/camera_kitti.yaml` pasa el pitch nominal de 2.5° a 0°, de modo que
 `max_step_deg` = 3° ya no recorta el lado bajo; (2) `robust_r`: la varianza de la
 mediana se sustituye por $\pi/2\cdot\sigma_{MAD}^2/n$ cuando supera 4× la formal
@@ -494,6 +494,38 @@ fuera del gate (`gated`). `--pitch-filter legacy --nominal-pitch-deg 2.5`
 reproduce el comportamiento anterior para A/B. En simulación (paseo aleatorio,
 escalón de −1.5°, dispersión 1° entre objetos, 10 % de atípicos) el RMSE del
 pitch baja de 0.47–1.01° a 0.32–0.70°; los DoD sintéticos de F4 siguen cumpliéndose.
+
+Medida en KITTI (red FP16, cajas GT, OXTS), filtro anterior → robusto:
+
+| | 0000 | 0001 | 0020 |
+|---|---|---|---|
+| RMSE V 0–30 m (m/s) | 1.21 → 1.21 | **1.64 → 1.25** | 0.87 → 0.85 ✔ |
+| Sesgo $V_Z$ 10–20 m (m/s) | +0.74 → +0.77 | **+0.93 → +0.08** | −0.15 → −0.17 |
+| Sesgo $V_Z$ en curva (\|ω\| ≥ 0.05 rad/s) | +0.82 → +0.77 | +1.26 → +1.11 | — |
+
+F4 0001: AbsRel 0–30 / 30–60 m 8.7 / 9.1 % → 6.5 / 5.7 %, residuo medio del pitch
+−0.48° → +0.18°, 4 de 447 frames fuera del gate. En recta el sesgo de $V_Z$ de la
+0001 desaparece (+0.77 → +0.09 m/s); el DoD sigue sin cumplirse en 0000/0001 por
+el sesgo en curvas (72 de las 81 muestras de la 0000 son en curva), que no
+depende del pitch.
+
+**Diagnóstico del sesgo en curvas.** `run_tracking_kitti` guarda por muestra la
+velocidad de giro con signo, $X$ y el error de posición (tracker − GT), y
+`diagnostics()["turn"]` separa las causas candidatas:
+- `vz_err_vs_omega_x` / `vx_err_vs_omega_z`: ajuste del error frente al término
+  del marco rotante $\omega\cdot(-Z, X)$; pendiente ≈ ±1 ⇒ término ausente o con
+  signo cambiado (el test de un punto estático visto en curva fija el convenio
+  de la referencia GT);
+- `by_turn_direction` (izquierda / recta / derecha): error medio de posición
+  `mean_ez_m` (incluye el desfase constante centro de objeto ↔ centro inferior de
+  la etiqueta), `mean_ez_rel` y su derivada `mean_dez_dt_mps`; si
+  `vz_err_minus_range_drift` ≈ 0, el sesgo viene de una deriva del rango durante
+  la curva (profundidad/suelo), no de la compensación del ego-motion.
+
+El JSON añade `pooled_diagnostics` (todas las secuencias juntas), `lever_arm_m` y
+`oxts_offset_ms`. `--oxts-offset-ms` desplaza el reloj OXTS respecto a la cámara
+(ego-motion y término de rotación del GT a la vez) y `--lever-arm` (1.08 m por
+defecto) el brazo de palanca, para barrer ambas hipótesis.
 
 ```bash
 uv run python scripts/eval_tracking_synthetic.py --json reports/f5_synth.json
@@ -508,6 +540,18 @@ uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --
     --json reports/f5_kitti_pitch_legacy.json
 uv run python scripts/eval_tracking_kitti.py --root $KT --seqs 0000 0001 0020 --ego oxts \
     --engine models/depth_924x280_fp16.engine --json reports/f5_kitti_pitch_robust.json
+# Diagnóstico del sesgo en curvas: 21 secuencias, luego barrido de desfase OXTS y brazo de palanca
+SEQS=$(seq -f %04g 0 20)
+uv run python scripts/eval_tracking_kitti.py --root $KT --seqs $SEQS --ego oxts \
+    --engine models/depth_924x280_fp16.engine --json reports/f5_turn_base.json
+for OFF in -100 -50 50 100; do
+  uv run python scripts/eval_tracking_kitti.py --root $KT --seqs $SEQS --ego oxts \
+      --engine models/depth_924x280_fp16.engine --oxts-offset-ms $OFF --json reports/f5_turn_off$OFF.json
+done
+for ARM in 0 2.16; do
+  uv run python scripts/eval_tracking_kitti.py --root $KT --seqs $SEQS --ego oxts \
+      --engine models/depth_924x280_fp16.engine --lever-arm $ARM --json reports/f5_turn_arm$ARM.json
+done
 ```
 
 ---

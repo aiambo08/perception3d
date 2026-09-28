@@ -24,6 +24,18 @@ Diagnostics: the velocity error is broken down by distance bin and by ego yaw ra
 (bias, RMSE, P50/P95 of ``|Δv|``). ``gt_alt`` (the same reference with a wider
 difference window) gives the spread of the GT itself, a floor on the attainable RMSE
 at that distance.
+
+Turn diagnostics (``turn``, needs OXTS) separate the candidate causes of a velocity
+bias while the ego vehicle yaws:
+
+* ``vz_err_vs_omega_x`` / ``vx_err_vs_omega_z``: fits of the error against the
+  rotating-frame term ``ω·(−Z, X)``; a slope near ``±1`` means that term is missing
+  or has the wrong sign on one side (tracker or GT);
+* ``by_turn_direction``: left / straight / right, with the mean position error
+  ``ez`` (tracker − GT), its relative value ``ez/Z`` and its rate ``d(ez)/dt`` (central
+  difference over the same GT track). A velocity bias equal to ``d(ez)/dt`` comes
+  from a range error that drifts during the turn (depth/ground), not from the
+  ego-motion compensation; ``vz_err_minus_range_drift`` is what remains.
 """
 
 from __future__ import annotations
@@ -134,6 +146,7 @@ DIAG_BINS_M: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 60.0)
 DIAG_ACCEL_BINS: tuple[float, ...] = (-math.inf, -1.5, -0.5, 0.5, 1.5, math.inf)
 DIAG_AGE_BINS_S: tuple[float, ...] = (1.0, 2.0, 4.0, math.inf)
 TURN_YAW_RATE_RPS = 0.05
+_DRIFT_HALF_WINDOW = 2
 
 
 def _err_stats(e: NDArray[np.float64]) -> dict[str, Any]:
@@ -175,6 +188,9 @@ class TrackingKittiResult:
     diag: list[tuple[float, ...]] = field(default_factory=list)
     """``(dvx, dvz, Z, |yaw rate|, gt_spread_x, gt_spread_z, ref_vz, ego_fwd, ref_az, age_s)`` per sample,
     any distance (``nan`` where unknown)."""
+    turn_diag: list[tuple[float, ...]] = field(default_factory=list)
+    """``(signed yaw rate, X, ex, ez, frame, gt_track_id)`` per ``diag`` sample (position
+    error = tracker − GT, m)."""
     id_switches: int = 0
     n_gt_ids: int = 0
     n_matches: int = 0
@@ -219,6 +235,45 @@ class TrackingKittiResult:
             f"{lo:g}_{hi:g}": _err_stats(e[(age >= lo) & (age < hi)])
             for lo, hi in zip(DIAG_AGE_BINS_S[:-1], DIAG_AGE_BINS_S[1:], strict=True)
         }
+        if (
+            self.turn_diag
+            and len(self.turn_diag) == d.shape[0]
+            and np.any(np.isfinite(np.asarray(self.turn_diag, dtype=np.float64)[:, 0]))
+        ):
+            out["turn"] = self._turn_diagnostics(d)
+        return out
+
+    def _turn_diagnostics(self, d: NDArray[np.float64]) -> dict[str, Any]:
+        t = np.asarray(self.turn_diag, dtype=np.float64).reshape(-1, 6)
+        e, z = d[:, :2], d[:, 2]
+        w, x, ez = t[:, 0], t[:, 1], t[:, 3]
+        drift = _range_drift_rate(t[:, 4], t[:, 5], ez)
+        out: dict[str, Any] = {
+            "vz_err_vs_omega_x": _linfit(w * x, e[:, 1]),
+            "vx_err_vs_omega_z": _linfit(-w * z, e[:, 0]),
+        }
+        groups = {
+            "left": w >= TURN_YAW_RATE_RPS,
+            "straight": np.abs(w) < TURN_YAW_RATE_RPS,
+            "right": w <= -TURN_YAW_RATE_RPS,
+        }
+        by_dir: dict[str, Any] = {}
+        for name, m in groups.items():
+            st = _err_stats(e[m])
+            if st["n"]:
+                zm = z[m]
+                dm = drift[m]
+                fin = np.isfinite(dm)
+                st["mean_ez_m"] = float(ez[m].mean())
+                st["mean_ez_rel"] = float(np.mean(ez[m] / np.maximum(zm, 1e-3)))
+                st["mean_x_m"] = float(x[m].mean())
+                st["n_drift"] = int(fin.sum())
+                st["mean_dez_dt_mps"] = float(dm[fin].mean()) if fin.any() else float("nan")
+                st["vz_err_minus_range_drift"] = (
+                    float(np.mean(e[m][fin, 1] - dm[fin])) if fin.any() else float("nan")
+                )
+            by_dir[name] = st
+        out["by_turn_direction"] = by_dir
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -251,6 +306,43 @@ class TrackingKittiResult:
             "tracker_ms_p50_p95_p99": pct(self.tracker_ms),
             "diagnostics": self.diagnostics(),
         }
+
+
+def _range_drift_rate(
+    frame: NDArray[np.float64],
+    tid: NDArray[np.float64],
+    ez: NDArray[np.float64],
+    fps: float = KITTI_FPS,
+    half_window: int = _DRIFT_HALF_WINDOW,
+) -> NDArray[np.float64]:
+    """``d(ez)/dt`` per sample by central difference over the same GT track (``nan``
+    without neighbours on both sides)."""
+    idx = {(int(f), int(k)): i for i, (f, k) in enumerate(zip(frame, tid, strict=True))}
+    out = np.full(ez.shape[0], np.nan)
+    for i, (f, k) in enumerate(zip(frame.astype(int), tid.astype(int), strict=True)):
+        lo = next((f - j for j in range(half_window, 0, -1) if (f - j, k) in idx), None)
+        hi = next((f + j for j in range(half_window, 0, -1) if (f + j, k) in idx), None)
+        if lo is not None and hi is not None:
+            out[i] = (ez[idx[(hi, k)]] - ez[idx[(lo, k)]]) * fps / (hi - lo)
+    return out
+
+
+def merge_results(results: Sequence[TrackingKittiResult]) -> TrackingKittiResult:
+    """Pool the per-sample diagnostics of several sequences (``diagnostics()`` only).
+
+    Track ids are offset per sequence so the range-drift differences stay within one
+    sequence."""
+    out = TrackingKittiResult()
+    offset = 0.0
+    for r in results:
+        out.diag.extend(r.diag)
+        if len(r.turn_diag) == len(r.diag):
+            out.turn_diag.extend((*t[:5], t[5] + offset) for t in r.turn_diag)
+            offset += max((t[5] for t in r.turn_diag), default=0.0) + 1.0
+        out.vel_err.extend(r.vel_err)
+    if len(out.turn_diag) != len(out.diag):
+        out.turn_diag = []
+    return out
 
 
 def run_tracking_kitti(
@@ -335,6 +427,16 @@ def run_tracking_kitti(
                     ego_fwd,
                     az,
                     tr.age_s,
+                )
+            )
+            res.turn_diag.append(
+                (
+                    float(k.yaw_rate_rps) if k.yaw_rate_rps is not None else float("nan"),
+                    k.x_m,
+                    float(tr.position_xz[0]) - k.x_m,
+                    float(tr.position_xz[1]) - k.z_m,
+                    float(fs.frame_id),
+                    float(lab.track_id),
                 )
             )
             if bin_m[0] <= k.z_m <= bin_m[1]:

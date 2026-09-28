@@ -18,6 +18,7 @@ of the earlier pose.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import astuple
 from pathlib import Path
 from typing import Protocol
 
@@ -108,6 +109,30 @@ class OxtsEgoMotion:
         v0, w0 = self._at(t0_ns)
         v1, w1 = self._at(t1_ns)
         return _arc_delta((t1_ns - t0_ns) * 1e-9, v0, v1, w0, w1, self.sigma_v)
+
+
+_OXTS_ANGLE_FIELDS = (3, 4, 5)  # roll, pitch, yaw
+
+
+def resample_oxts(
+    records: Sequence[OxtsRecord], t_ns: Sequence[int], offset_ns: int
+) -> list[OxtsRecord]:
+    """Records at ``t_ns[i] + offset_ns``, linearly interpolated (clamped at the ends).
+
+    Models an OXTS clock ``offset_ns`` ahead of the camera: frame ``i`` gets the INS
+    state measured ``offset_ns`` later. Angles are unwrapped before interpolating and wrapped back to ``(−π, π]``.
+    """
+    if len(t_ns) != len(records) or not records:
+        raise ValueError("need one OXTS record per timestamp")
+    t = np.asarray(t_ns, dtype=np.float64)
+    vals = np.array([astuple(r) for r in records], dtype=np.float64)
+    for j in _OXTS_ANGLE_FIELDS:
+        vals[:, j] = np.unwrap(vals[:, j])
+    tq = t + float(offset_ns)
+    cols = [np.interp(tq, t, vals[:, j]) for j in range(vals.shape[1])]
+    for j in _OXTS_ANGLE_FIELDS:
+        cols[j] = np.angle(np.exp(1j * cols[j]))
+    return [OxtsRecord(*(float(c[i]) for c in cols)) for i in range(len(records))]
 
 
 def load_oxts_file(path: Path | str) -> list[OxtsRecord]:
