@@ -52,7 +52,9 @@ criterios cumplen (detalle en el plan). F8 (endurecimiento) añade la
 calibración INT8 del detector con frames KITTI y su veredicto FP16 frente a
 INT8, el histórico de benchmarks con detección de regresiones, los tests
 `gpu` de humo, la imagen `nvidia/cuda` para regenerar engines y la guía de
-arranque en WSL2 de abajo; las medidas INT8 quedan pendientes de la GPU.
+arranque en WSL2 de abajo. INT8 se midió y se rechazó: baja el P95 de
+`det.gpu` un 38 %, pero pierde 7.3 pt de recall de peatones (IC95
+[−8.7, −5.9]) sobre 6743 peatones, así que el detector se queda en FP16.
 
 ## Arranque en WSL2
 
@@ -195,13 +197,15 @@ Endurecimiento (F8), en la máquina con GPU:
 uv run python scripts/export_trt.py models/detector_1024x320.onnx models/detector_1024x320_int8.engine \
     --precision int8 --calib-dir "$KT/image_02/0000" "$KT/image_02/0001" "$KT/image_02/0020" \
     --calib-frames 500 --calib-cache models/detector_1024x320_int8.cache
-# 2. Mismo benchmark con los dos engines (mismas secuencias y frames) y veredicto
-uv run python scripts/bench_detector.py --engine models/detector_1024x320_fp16.engine \
-    --kitti-root "$KT" --seqs 0000 0001 0020 --frames 200 --json reports/det_fp16.json --archive
-uv run python scripts/bench_detector.py --engine models/detector_1024x320_int8.engine \
-    --kitti-root "$KT" --seqs 0000 0001 0020 --frames 200 --json reports/det_int8.json --archive
-uv run python scripts/compare_engines.py reports/det_fp16.json reports/det_int8.json \
-    --json reports/det_fp16_vs_int8.json     # ACCEPT si Δrecall peatones ≥ −2 pt y det.gpu P95 baja ≥ 25 %
+# 2. Mismo benchmark con los dos engines y veredicto. Secuencias con muchos peatones
+#    (≈ 6700 moderate): con 0000/0001/0020 sólo hay 67 y el IC95 no decide
+for P in fp16 int8; do
+  uv run python scripts/bench_detector.py --engine models/detector_1024x320_$P.engine \
+    --kitti-root "$KT" --seqs 0001 0013 0015 0016 0017 0019 --frames 500 --warmup 200 \
+    --json reports/det_${P}_ped.json --archive
+done
+uv run python scripts/compare_engines.py reports/det_fp16_ped.json reports/det_int8_ped.json \
+    --json reports/det_fp16_vs_int8_ped.json # ACCEPT si Δrecall peatones ≥ −2 pt y det.gpu P95 baja ≥ 25 %
 # 3. Histórico: --archive en bench_detector/bench_depth/run_pipeline guarda una copia en data/outputs/bench/
 uv run python scripts/bench_history.py list
 uv run python scripts/bench_history.py check --name pipeline   # regresión si P95/P99/VRAM/descartes empeoran > 10 % y > 0.2
