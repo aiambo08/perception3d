@@ -127,7 +127,7 @@ def _args() -> argparse.Namespace:
     mdl = ap.add_argument_group("models")
     mdl.add_argument("--camera", type=Path, default=ROOT / "configs/camera_kitti.yaml")
     mdl.add_argument("--fusion", type=Path, default=ROOT / "configs/fusion.yaml")
-    mdl.add_argument("--tracking", type=Path, default=ROOT / "configs/tracking.yaml")
+    mdl.add_argument("--tracking", type=Path, default=ROOT / "configs/tracking_kitti.yaml")
     mdl.add_argument("--safety", type=Path, default=ROOT / "configs/safety.yaml")
     mdl.add_argument("--models", type=Path, default=ROOT / "configs/models.yaml")
     mdl.add_argument("--boxes", choices=("gt", "detector", "none"), default=None)

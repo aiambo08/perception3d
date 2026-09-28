@@ -581,6 +581,29 @@ for Q in 0.25 4; do
 done
 ```
 
+**Resultado del barrido (21 secuencias, RMSE V 0–30 m del pool).**
+
+| R · q | 0–30 m | track > 4 s (RMSE / P95) | track 1–2 s | NIS medio | `static_frac` mín. |
+|---|---|---|---|---|---|
+| 1 · 1 | 1.09 | 0.90 / 1.88 | 1.83 | 0.27 | 0.83 |
+| 2 · 1 / 4 · 1 | 1.15 / 1.22 | 0.99 / 1.10 | 1.90 / 2.01 | 0.19 / 0.13 | 0.99 / 1.00 |
+| 1 · 0.25 | 1.17 | 1.09 / 2.24 | 1.87 | 0.48 | 0.63 |
+| 0.5 · 1 | 1.07 | 0.84 / 1.73 | 1.83 | 0.41 | 0.70 |
+| **1 · 4** | 1.10 | **0.82 / 1.67** | 1.83 | 0.16 | **1.00** |
+| 0.5 · 4 / 0.25 · 4 | 1.13 / 1.18 | 0.83 / 0.85 | 1.85 / 1.88 | 0.24 / 0.38 | 1.00 / 0.91 |
+
+El RMSE de 0–30 m se queda en 1.07–1.22 m/s y el de los tracks de 1–2 s en 1.83–2.01
+con cualquier sintonía. El NIS sigue muy por debajo de 2 incluso con `R·0.25`, mientras
+el error absoluto es alto. Por tanto el error de F4 está correlado en el tiempo (deriva
+del rango), y un KF con ruido blanco no puede promediarlo: el límite está en la
+profundidad, no en el tracker. **Decisión:** `dynamics.vehicle.q = 4`, `r_scale = 1` en
+`configs/tracking_kitti.yaml`, por defecto en `eval_tracking_kitti.py` y `run_pipeline.py`. Da
+mejores colas en los tracks maduros y `static_frac` 1.00 en todas las secuencias, a
+cambio de un RMSE a 0–10 m de 1.08 m/s (antes 0.87). El DoD de F5 queda como limitación
+aceptada, atribuida a F4.
+`configs/tracking.yaml` mantiene q = 1 para el DoD sintético: allí los objetos van a velocidad
+constante, y con q = 4 el escenario con jitter de Δt sube de 0.40 a 0.61 m/s (límite 0.5).
+
 ---
 
 ## F6 · Cinemática y seguridad — ✔ implementado (CPU)
