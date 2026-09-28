@@ -1,0 +1,312 @@
+{
+  "engine": "models/detector_1024x320_int8.engine",
+  "frames": 554,
+  "stages": {
+    "det.preprocess": {
+      "name": "det.preprocess",
+      "count": 554,
+      "mean_ms": 0.7415982256317689,
+      "p50_ms": 0.7347554999999999,
+      "p95_ms": 0.84404765,
+      "p99_ms": 1.03568499,
+      "max_ms": 1.262411
+    },
+    "det.postprocess": {
+      "name": "det.postprocess",
+      "count": 554,
+      "mean_ms": 0.07858398736462094,
+      "p50_ms": 0.072825,
+      "p95_ms": 0.11052595000000003,
+      "p99_ms": 0.15309213000000005,
+      "max_ms": 0.251985
+    },
+    "det.gpu": {
+      "name": "det.gpu",
+      "count": 554,
+      "mean_ms": 0.7377039708385399,
+      "p50_ms": 0.6640480160713196,
+      "p95_ms": 1.0066495925188075,
+      "p99_ms": 1.1653245091438298,
+      "max_ms": 1.35971200466156
+    },
+    "detector_e2e": {
+      "name": "detector_e2e",
+      "count": 554,
+      "mean_ms": 1.7078533086633807,
+      "p50_ms": 1.6266609999888715,
+      "p95_ms": 2.150543149986106,
+      "p99_ms": 2.333511030041109,
+      "max_ms": 2.4888039999950706
+    }
+  },
+  "vram_mb": {
+    "baseline": 0.0,
+    "loaded": 148.9921875,
+    "peak": 148.9921875,
+    "gpu_peak": 1766.32421875,
+    "process_source": "device_delta"
+  },
+  "gpu_state": {
+    "samples": 49,
+    "sm_clock_mhz_min": 555.0,
+    "sm_clock_mhz_p50": 1890.0,
+    "sm_clock_mhz_max": 2625.0,
+    "temperature_c_max": 50.0,
+    "power_w_p50": 11.696,
+    "power_w_max": 33.328,
+    "thermal_frac": 0.10204081632653061,
+    "power_frac": 0.10204081632653061,
+    "reason_frac": {
+      "gpu_idle": 0.6326530612244898,
+      "applications_clocks": 0.0,
+      "sw_power_cap": 0.10204081632653061,
+      "hw_slowdown": 0.0,
+      "sync_boost": 0.0,
+      "sw_thermal": 0.10204081632653061,
+      "hw_thermal": 0.0,
+      "hw_power_brake": 0.0,
+      "display_clocks": 0.0
+    }
+  },
+  "recall": {
+    "difficulty": "moderate",
+    "per_seq": {
+      "0000": {
+        "Car": {
+          "kitti_type": "Car",
+          "n_gt": 116,
+          "n_matched": 115,
+          "n_pred": 818,
+          "recall": 0.9913793103448276,
+          "recall_ci95": [
+            0.9527790060325537,
+            0.9984766514353037
+          ]
+        },
+        "Van": {
+          "kitti_type": "Van",
+          "n_gt": 185,
+          "n_matched": 172,
+          "n_pred": 834,
+          "recall": 0.9297297297297298,
+          "recall_ci95": [
+            0.8834980591030774,
+            0.9584774378213292
+          ]
+        },
+        "Truck": {
+          "kitti_type": "Truck",
+          "n_gt": 0,
+          "n_matched": 0,
+          "n_pred": 83,
+          "recall": NaN,
+          "recall_ci95": [
+            NaN,
+            NaN
+          ]
+        },
+        "Pedestrian": {
+          "kitti_type": "Pedestrian",
+          "n_gt": 9,
+          "n_matched": 6,
+          "n_pred": 220,
+          "recall": 0.6666666666666666,
+          "recall_ci95": [
+            0.35419734749908977,
+            0.879418401317257
+          ]
+        },
+        "Cyclist": {
+          "kitti_type": "Cyclist",
+          "n_gt": 154,
+          "n_matched": 83,
+          "n_pred": 415,
+          "recall": 0.538961038961039,
+          "recall_ci95": [
+            0.46024046134559793,
+            0.615785123797989
+          ]
+        }
+      },
+      "0001": {
+        "Car": {
+          "kitti_type": "Car",
+          "n_gt": 746,
+          "n_matched": 721,
+          "n_pred": 1405,
+          "recall": 0.9664879356568364,
+          "recall_ci95": [
+            0.9509965839489098,
+            0.9771994510536828
+          ]
+        },
+        "Van": {
+          "kitti_type": "Van",
+          "n_gt": 42,
+          "n_matched": 42,
+          "n_pred": 1753,
+          "recall": 1.0,
+          "recall_ci95": [
+            0.9161983874908382,
+            1.0
+          ]
+        },
+        "Truck": {
+          "kitti_type": "Truck",
+          "n_gt": 0,
+          "n_matched": 0,
+          "n_pred": 21,
+          "recall": NaN,
+          "recall_ci95": [
+            NaN,
+            NaN
+          ]
+        },
+        "Pedestrian": {
+          "kitti_type": "Pedestrian",
+          "n_gt": 18,
+          "n_matched": 16,
+          "n_pred": 32,
+          "recall": 0.8888888888888888,
+          "recall_ci95": [
+            0.6719975513339578,
+            0.9689811315464172
+          ]
+        },
+        "Cyclist": {
+          "kitti_type": "Cyclist",
+          "n_gt": 0,
+          "n_matched": 0,
+          "n_pred": 58,
+          "recall": NaN,
+          "recall_ci95": [
+            NaN,
+            NaN
+          ]
+        }
+      },
+      "0020": {
+        "Car": {
+          "kitti_type": "Car",
+          "n_gt": 1259,
+          "n_matched": 1167,
+          "n_pred": 1663,
+          "recall": 0.9269261318506752,
+          "recall_ci95": [
+            0.9112143724010618,
+            0.9400404484727517
+          ]
+        },
+        "Van": {
+          "kitti_type": "Van",
+          "n_gt": 64,
+          "n_matched": 19,
+          "n_pred": 2096,
+          "recall": 0.296875,
+          "recall_ci95": [
+            0.19904999589075245,
+            0.4177043259412798
+          ]
+        },
+        "Truck": {
+          "kitti_type": "Truck",
+          "n_gt": 3,
+          "n_matched": 0,
+          "n_pred": 103,
+          "recall": 0.0,
+          "recall_ci95": [
+            0.0,
+            0.5615060804490177
+          ]
+        },
+        "Pedestrian": {
+          "kitti_type": "Pedestrian",
+          "n_gt": 0,
+          "n_matched": 0,
+          "n_pred": 0,
+          "recall": NaN,
+          "recall_ci95": [
+            NaN,
+            NaN
+          ]
+        },
+        "Cyclist": {
+          "kitti_type": "Cyclist",
+          "n_gt": 0,
+          "n_matched": 0,
+          "n_pred": 0,
+          "recall": NaN,
+          "recall_ci95": [
+            NaN,
+            NaN
+          ]
+        }
+      }
+    },
+    "pooled": {
+      "Car": {
+        "kitti_type": "Car",
+        "n_gt": 2121,
+        "n_matched": 2003,
+        "n_pred": 3886,
+        "recall": 0.9443658651579444,
+        "recall_ci95": [
+          0.9337832577825964,
+          0.9533416930843295
+        ]
+      },
+      "Van": {
+        "kitti_type": "Van",
+        "n_gt": 291,
+        "n_matched": 233,
+        "n_pred": 4683,
+        "recall": 0.8006872852233677,
+        "recall_ci95": [
+          0.7510019674226228,
+          0.8425370718445634
+        ]
+      },
+      "Truck": {
+        "kitti_type": "Truck",
+        "n_gt": 3,
+        "n_matched": 0,
+        "n_pred": 207,
+        "recall": 0.0,
+        "recall_ci95": [
+          0.0,
+          0.5615060804490177
+        ]
+      },
+      "Pedestrian": {
+        "kitti_type": "Pedestrian",
+        "n_gt": 27,
+        "n_matched": 22,
+        "n_pred": 252,
+        "recall": 0.8148148148148148,
+        "recall_ci95": [
+          0.6330094349480825,
+          0.9181941342571468
+        ]
+      },
+      "Cyclist": {
+        "kitti_type": "Cyclist",
+        "n_gt": 154,
+        "n_matched": 83,
+        "n_pred": 473,
+        "recall": 0.538961038961039,
+        "recall_ci95": [
+          0.46024046134559793,
+          0.615785123797989
+        ]
+      }
+    },
+    "verdicts": {
+      "Car": "PASS",
+      "Pedestrian": "PASS"
+    }
+  },
+  "bench_history": {
+    "name": "detector",
+    "archived_at": "2026-09-28T13:55:11.587096+00:00"
+  }
+}
