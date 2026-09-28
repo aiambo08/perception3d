@@ -562,10 +562,14 @@ uv run python scripts/eval_safety_synthetic.py --seeds 10 --json reports/f6_synt
 
 **Alcance**
 - `runtime/pipeline.py`: `Pipeline.process(fs, t_ingress)` mono-hilo. Por
-  frame: si `DepthCadence.due(k)` y no hay profundidad en vuelo, se encola
+  frame: `boxes.submit(fs)` (detector reactivo o cajas GT); si
+  `DepthCadence.due(k)` y no hay profundidad en vuelo, se encola
   `depth.infer_stamped(fs)` (stream propio, nunca se espera aquí; si está en
-  vuelo se cuenta `skipped` y `n` sube 1); después `boxes.submit(fs).wait()`
-  (detector reactivo o cajas GT), `_poll_depth()` recoge el mapa si su evento
+  vuelo se cuenta `skipped` y `n` sube 1); después `wait()` de las cajas.
+  Encolar el detector primero evita que sus kernels esperen tras una pasada
+  de profundidad ya en marcha (la prioridad de stream no expropia kernels);
+  `PipelineConfig.depth_first` / `--depth-first` recupera el orden R3 de peor
+  caso. `_poll_depth()` recoge el mapa si su evento
   ya terminó, `BoxHistory` guarda las cajas del frame `k`, y la fusión recibe
   el mapa más reciente $j \le k$ junto con las cajas *del frame j* (R6:
   `net_boxes`; `MetricFusionStage` infla $\sigma_n$ con `net_age_sigma_mps ·
@@ -597,7 +601,10 @@ uv run python scripts/eval_safety_synthetic.py --seeds 10 --json reports/f6_synt
   --max-frames --capture-thread --depth-n INIT MIN MAX --telemetry
   none|null|jsonl|rerun --json`. El JSON trae `stats`, `stages`, `telemetry`,
   `vram_peak_over_baseline_mb` y `verdicts` del DoD (`null` cuando no es
-  medible, p. ej. VRAM sin GPU).
+  medible, p. ej. VRAM sin GPU). `stats.by_depth_enqueue` separa `boxes` y
+  captura→alerta de los frames que encolaron profundidad frente a los que no;
+  `stats.series` da una fila por segundo (frames, descartes, mapas, P50/P99/máx
+  de captura→alerta y P99 de `boxes`) para localizar picos.
 
 **Medido en CPU (tests + arnés con cajas GT, sin red):** `frame_id` y
 timestamps se propagan sin mezclar frames; la profundidad nunca bloquea el
@@ -606,6 +613,17 @@ lazo y el mapa usado siempre es de un frame $j \le k$ con sus propias cajas;
 lo antiguo con backend lento o roto y `log()` cuesta µs; cierre limpio con
 profundidad en vuelo y con el hilo de captura; ambas variantes de entrega
 producen el mismo informe. Nada de esto sustituye al DoD siguiente.
+
+**Medido en la GPU objetivo (KITTI 0001, detector + Depth Anything FP16,
+60 Hz, 5 min, orden depth-first de la primera versión):** lazo con ritmo
+P99 12.95 ms, hilo de captura 14.08 ms, 0 % descartes, VRAM ≤ 0.73 GB; la
+profundidad (7.3 ms de turnaround) cabe en el periodo y la cadencia se queda
+en `n = 1` (60 Hz, antigüedad 0). Rerun grabando a `.rrd`: P99 12.78 ms,
+`log()` P95 0.30 ms; con el visor bajo WSLg (`llvmpipe`, ~300 % CPU) el P99
+sube a 18.8 ms por contención de CPU, no por el sink. Forzando `n = 2`
+(`--depth-n 2 2 8`) el P99 fue 16.96 ms: `boxes` P99 12.3 ms en los frames
+con profundidad encolada antes que el detector → motivo del orden
+detector-primero [re-medir].
 
 **DoD (en la GPU objetivo, [medir])**
 - Lazo reactivo (captura → alerta): P99 ≤ 16.7 ms sostenido 5 min.

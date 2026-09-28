@@ -2,8 +2,9 @@
 
 Per captured frame ``k`` (:meth:`Pipeline.process`)::
 
+    h_boxes = boxes.submit(frame_k)                                               # high-prio stream
     if depth idle and cadence.due(k):   h_depth = depth.infer_stamped(frame_k)   # low-prio stream
-    boxes_k = boxes.submit(frame_k).wait()                                        # high-prio stream
+    boxes_k = h_boxes.wait()
     if h_depth.ready():                 map_j = h_depth.wait()   (j ≤ k; never waited for)
     net_boxes = history.match(boxes_k, j)          # boxes of frame j for sampling map_j (R6)
     meas  = fusion.process(k, boxes_k, map_j, net_boxes, age)
@@ -290,7 +291,14 @@ class PipelineStats:
     depth_lag_frames: list[int] = field(default_factory=list)
     depth_turnaround_ms: list[float] = field(default_factory=list)
     telemetry_ms: list[float] = field(default_factory=list)
+    boxes_ms_depth: list[float] = field(default_factory=list)
+    """``boxes`` time of frames that enqueued a depth inference."""
+    boxes_ms_no_depth: list[float] = field(default_factory=list)
+    e2e_alert_ms_depth: list[float] = field(default_factory=list)
+    e2e_alert_ms_no_depth: list[float] = field(default_factory=list)
     alerts_by_level: dict[str, int] = field(default_factory=dict)
+    series: list[dict[str, float]] = field(default_factory=list)
+    """One entry per ``series_period_s`` of loop time (see :meth:`Pipeline.run`)."""
 
     @property
     def input_hz(self) -> float:
@@ -337,7 +345,18 @@ class PipelineStats:
             "e2e_alert_ms": pct(self.e2e_alert_ms),
             "loop_ms": pct(self.loop_ms),
             "telemetry_ms": pct(self.telemetry_ms),
+            "by_depth_enqueue": {
+                "boxes_ms": {
+                    "depth": pct(self.boxes_ms_depth),
+                    "no_depth": pct(self.boxes_ms_no_depth),
+                },
+                "e2e_alert_ms": {
+                    "depth": pct(self.e2e_alert_ms_depth),
+                    "no_depth": pct(self.e2e_alert_ms_no_depth),
+                },
+            },
             "alerts_by_level": dict(self.alerts_by_level),
+            "series": list(self.series),
         }
 
 
@@ -352,6 +371,10 @@ class PipelineConfig:
     box_history: int = 64
     net_box_iou: float = 0.3
     ego_front_m: float = 1.5
+    depth_first: bool = False
+    """Enqueue depth before the detector (the R3 worst case for the detector's tail).
+    Default: detector first, so its kernels are not queued behind a running depth pass."""
+    series_period_s: float = 1.0
 
 
 class Pipeline:
@@ -383,6 +406,7 @@ class Pipeline:
         self.newest_map: DepthMap | None = None
         self._pending: tuple[DepthHandleLike, int] | None = None
         self._last_frame_id: int | None = None
+        self._series = _SeriesWindow(self.cfg.series_period_s)
 
     # -- one frame -------------------------------------------------------------
 
@@ -400,6 +424,19 @@ class Pipeline:
         self.newest_map = m
         return m
 
+    def _maybe_enqueue_depth(self, fs: FrameStamped) -> bool:
+        enqueued = False
+        if self.depth is not None and self.cadence.due(fs.frame_id):
+            if self._pending is None:
+                self._pending = (self.depth.infer_stamped(fs), self.clock_ns())
+                self.cadence.on_enqueue(fs.frame_id)
+                enqueued = True
+            else:
+                self.cadence.on_skip()
+        self.stats.depth_enqueued = self.cadence.enqueued
+        self.stats.depth_skipped = self.cadence.skipped
+        return enqueued
+
     def process(self, fs: FrameStamped, t_ingress_ns: int | None = None) -> FrameResult:
         """Run the reactive path for ``fs``; returns everything stamped with ``fs.frame_id``."""
         if self._last_frame_id is not None and fs.frame_id <= self._last_frame_id:
@@ -410,18 +447,14 @@ class Pipeline:
         t0 = self.clock_ns()
         timings: dict[str, float] = {}
 
-        # Depth first: worst case for the detector's tail (see runtime/contention.py).
-        if self.depth is not None and self.cadence.due(k):
-            if self._pending is None:
-                self._pending = (self.depth.infer_stamped(fs), self.clock_ns())
-                self.cadence.on_enqueue(k)
-            else:
-                self.cadence.on_skip()
-        self.stats.depth_enqueued = self.cadence.enqueued
-        self.stats.depth_skipped = self.cadence.skipped
-
+        depth_now = False
+        if self.cfg.depth_first:
+            depth_now = self._maybe_enqueue_depth(fs)
         t = self.clock_ns()
-        b = self.boxes.submit(fs).wait()
+        h_boxes = self.boxes.submit(fs)
+        if not self.cfg.depth_first:
+            depth_now = self._maybe_enqueue_depth(fs)
+        b = h_boxes.wait()
         timings["boxes"] = (self.clock_ns() - t) * 1e-6
 
         t = self.clock_ns()
@@ -487,6 +520,13 @@ class Pipeline:
         st.frames += 1
         st.e2e_alert_ms.append(timings["e2e_alert"])
         st.loop_ms.append(timings["loop"])
+        if depth_now:
+            st.boxes_ms_depth.append(timings["boxes"])
+            st.e2e_alert_ms_depth.append(timings["e2e_alert"])
+        else:
+            st.boxes_ms_no_depth.append(timings["boxes"])
+            st.e2e_alert_ms_no_depth.append(timings["e2e_alert"])
+        self._series.add(t_alert, timings["e2e_alert"], timings["boxes"], new_map is not None)
         if m is not None:
             st.depth_age_ms.append(age_ms)
             st.depth_lag_frames.append(lag)
@@ -504,14 +544,21 @@ class Pipeline:
         on_result: Callable[[FrameResult], None] | None = None,
         dropped: Callable[[], int] | None = None,
     ) -> PipelineStats:
-        """Process ``(frame, t_ingress_ns)`` pairs until exhausted; closes the sink."""
+        """Process ``(frame, t_ingress_ns)`` pairs until exhausted; closes the sink.
+
+        Also fills :attr:`PipelineStats.series`: per ``series_period_s`` window of
+        loop time, frames, dropped frames, depth maps and e2e/boxes percentiles.
+        """
         t_start = self.clock_ns()
+        self._series.start(t_start, dropped)
         try:
             for fs, t_in in frames:
                 res = self.process(fs, t_in)
                 if on_result is not None:
                     on_result(res)
         finally:
+            self._series.flush()
+            self.stats.series = self._series.rows
             if self._pending is not None:
                 self._pending[0].wait()
                 self._pending = None
@@ -522,6 +569,67 @@ class Pipeline:
             if self.sink is not None:
                 self.sink.close()
         return self.stats
+
+
+class _SeriesWindow:
+    def __init__(self, period_s: float) -> None:
+        if period_s <= 0:
+            raise ValueError("series_period_s must be > 0")
+        self.period_ns = int(round(period_s * 1e9))
+        self.rows: list[dict[str, float]] = []
+        self._t0: int | None = None
+        self._dropped: Callable[[], int] | None = None
+        self._reset(0, 0)
+
+    def _reset(self, idx: int, dropped_base: int) -> None:
+        self._idx = idx
+        self._drop_base = dropped_base
+        self._e2e: list[float] = []
+        self._boxes: list[float] = []
+        self._maps = 0
+
+    def start(self, t_ns: int, dropped: Callable[[], int] | None) -> None:
+        self._t0 = t_ns
+        self._dropped = dropped
+        self.rows = []
+        self._reset(0, dropped() if dropped is not None else 0)
+
+    def add(self, t_ns: int, e2e_ms: float, boxes_ms: float, new_map: bool) -> None:
+        if self._t0 is None:
+            return
+        idx = (t_ns - self._t0) // self.period_ns
+        if idx != self._idx:
+            self._emit()
+            self._reset(idx, self._drop_now())
+        self._e2e.append(e2e_ms)
+        self._boxes.append(boxes_ms)
+        self._maps += int(new_map)
+
+    def flush(self) -> None:
+        if self._t0 is not None:
+            self._emit()
+            self._t0 = None
+
+    def _drop_now(self) -> int:
+        return self._dropped() if self._dropped is not None else 0
+
+    def _emit(self) -> None:
+        if not self._e2e:
+            return
+        e50, _, e99 = percentiles_ms(self._e2e)
+        _, _, b99 = percentiles_ms(self._boxes)
+        self.rows.append(
+            {
+                "t_s": self._idx * self.period_ns * 1e-9,
+                "frames": float(len(self._e2e)),
+                "dropped": float(self._drop_now() - self._drop_base),
+                "depth_maps": float(self._maps),
+                "e2e_p50_ms": e50,
+                "e2e_p99_ms": e99,
+                "e2e_max_ms": max(self._e2e),
+                "boxes_p99_ms": b99,
+            }
+        )
 
 
 # ─── Frame delivery ────────────────────────────────────────────────────────────
