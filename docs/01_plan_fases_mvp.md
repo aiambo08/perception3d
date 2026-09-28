@@ -650,7 +650,7 @@ segundo → host/WSL, no verificado). Todos los criterios siguientes cumplen.
 
 ---
 
-## F8 · Endurecimiento — ✔ implementado; INT8 [medir]
+## F8 · Endurecimiento — ✔ cerrada; detector en FP16 (INT8 rechazado)
 
 - INT8 en detector con calibración KITTI: aceptar solo si Δrecall peatones
   ≥ −2 pt y Δlatencia ≤ −25 %.
@@ -708,12 +708,35 @@ segundo → host/WSL, no verificado). Todos los criterios siguientes cumplen.
   caché), los veredictos (incluidos informes aleatorios frente a la regla),
   el histórico y los dos scripts de línea de comandos.
 
-**Pendiente de medir en la GPU objetivo (comandos en el README, bloque
-F8):** el engine INT8 y su veredicto frente a FP16. Con `det.gpu` en 1.1 ms
-P95 el 25 % exige bajar a ≤ 0.8 ms; si la GPU está limitada por el lanzamiento
-de kernels y no por el cómputo, es probable que INT8 no llegue y la decisión
-del plan sea quedarse en FP16 — el resultado es aceptable en ambos sentidos,
-lo que importa es medirlo.
+**Medido en la GPU objetivo (RTX Ada 8 GB, WSL2).** Calibración de entropía
+sobre 500 frames de 0000/0001/0020; benchmark con `--frames 500 --warmup 200`
+sobre 0001/0013/0015/0016/0017/0019 (2017 frames, 6743 peatones moderate):
+
+| | FP16 | INT8 | Δ |
+|---|---|---|---|
+| Recall `Pedestrian` | 79.9 % | 72.7 % | **−7.3 pt** (IC95 [−8.7, −5.9]) → FAIL |
+| Recall `Car` | 81.2 % | 78.1 % | −3.1 pt (IC95 [−5.2, −1.0]) |
+| Recall `Van` / `Cyclist` | 94.3 % / 29.1 % | 82.1 % / 24.9 % | −12.2 / −4.2 pt |
+| `det.gpu` P50 / P95 | 0.93 / 2.64 ms | 0.70 / 1.64 ms | −24 % / **−38 %** → PASS |
+| `detector_e2e` P95 | 3.76 ms | 2.88 ms | −0.9 ms |
+
+**Decisión: `REJECT`, el detector se queda en FP16.** La caída de recall es
+concluyente (el IC95 entero queda por debajo de −2 pt) y sistemática: baja en
+las seis secuencias y el número de predicciones cae un 28 % en todas las
+clases (10 794 → 7 822), compatible con que INT8 desplace las confianzas por
+debajo del `score_threshold: 0.25` del NMS en grafo (inferencia a partir de
+los recuentos; las puntuaciones no se midieron). La ganancia de latencia es
+real pero irrelevante para el lazo: ≈ 0.25 ms en P50 y ≈ 0.9 ms en P95 frente
+a un P99 captura→alerta de 9.0 ms con presupuesto de 16.7 ms. Una primera
+corrida sobre 0000/0001/0020 (sólo 67 peatones) daba −9.0 pt con IC95
+[−24, +6], no concluyente: para decidir hace falta un conjunto con cientos de
+peatones. Los percentiles de la corrida FP16 salieron inflados porque la GPU
+estuvo inactiva el 42 % de las muestras (el P95 de `det.gpu` en F2 era
+≈ 1.1 ms); el P50 es la comparación más estable.
+
+Opción abierta, sin programar: si el hardware se queda corto (p. ej. Jetson),
+reintentar INT8 con calibrador MinMax, umbral de confianza propio del engine
+INT8 o la cabeza de detección fijada en FP16, y repetir el mismo veredicto.
 
 ---
 
