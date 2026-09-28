@@ -9,4 +9,4 @@ intrinsics:
 
 extrinsics:
   camera_height_m: 1.65
-  pitch_deg: 2.5
+  pitch_deg: 0.0           # cámara rectificada de KITTI ≈ nivelada: las alturas de clase dan ≈ −0.06° de media en 0001

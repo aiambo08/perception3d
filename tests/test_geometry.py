@@ -331,7 +331,7 @@ def test_yaml_config_loading() -> None:
     assert geom.intrinsics.width == 1242
     assert geom.intrinsics.height == 375
     assert np.isclose(geom.extrinsics.camera_height_m, 1.65)
-    assert np.isclose(np.rad2deg(geom.extrinsics.pitch_rad), 2.5, atol=1e-4)
+    assert np.isclose(np.rad2deg(geom.extrinsics.pitch_rad), 0.0, atol=1e-4)
     assert geom.extrinsics.roll_rad == 0.0
 
 

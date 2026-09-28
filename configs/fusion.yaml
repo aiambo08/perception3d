@@ -80,4 +80,7 @@ pitch_filter:               # pitch en línea desde alturas de clase (ver ground
   sigma0_deg: 1.0
   q_deg_per_sqrt_s: 0.3
   min_objects: 1
-  max_step_deg: 3.0
+  max_step_deg: 3.0         # descarte duro alrededor del pitch nominal de la cámara
+  robust_r: true            # varianza de la mediana ≥ π/2·σ_MAD²/n (dispersión real entre objetos)
+  soft_gate: true           # fuera del gate χ² se infla R (Huber) en vez de descartar
+  reset_after_gated: 10     # N frames seguidos fuera del gate → reinicio en la medida (0 = nunca)

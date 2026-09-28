@@ -257,6 +257,9 @@ def load_solver_configs(
         q_rad_per_sqrt_s=float(np.deg2rad(float(pit.get("q_deg_per_sqrt_s", 0.3)))),
         min_objects=int(pit.get("min_objects", 1)),
         max_step_rad=float(np.deg2rad(float(pit.get("max_step_deg", 3.0)))),
+        robust_r=bool(pit.get("robust_r", True)),
+        soft_gate=bool(pit.get("soft_gate", True)),
+        reset_after_gated=int(pit.get("reset_after_gated", 10)),
     )
     return road_cfg, aff_cfg, pit_cfg
 

@@ -194,6 +194,10 @@ class PitchFrame:
     """Median of the per-object pitches implied by the height cue (``nan`` if none):
     the pitch at which the ground and height cues of each box would agree."""
     n_meas: int
+    n_discarded: int = 0
+    """Object pitches dropped by the filter for lying beyond ``max_step`` of the nominal."""
+    gated: bool = False
+    """The frame median fell outside the filter's χ² gate."""
 
 
 def _pct(a: NDArray[np.float64]) -> dict[str, float]:
@@ -310,6 +314,8 @@ class FusionKittiResult:
         out: dict[str, Any] = {
             "n_frames": int(filt.size),
             "n_frames_with_meas": int(ok.sum()),
+            "n_discarded": int(sum(p.n_discarded for p in self.pitch_series)),
+            "n_frames_gated": int(sum(p.gated for p in self.pitch_series)),
         }
         if filt.size:
             out["filtered_deg"] = {
@@ -422,6 +428,8 @@ def run_fusion_kitti(
                 sigma_deg=float(np.rad2deg(out.pitch.sigma_rad)),
                 meas_median_deg=float(np.rad2deg(np.median(th))) if th.size else float("nan"),
                 n_meas=int(th.size),
+                n_discarded=out.pitch.n_discarded_last,
+                gated=out.pitch.gated_last,
             )
         )
     return res

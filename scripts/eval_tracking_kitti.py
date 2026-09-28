@@ -112,12 +112,26 @@ def main() -> int:
         default=None,
         help="Override noise.sigma_pitch_deg of --fusion (BLUE weight of the ground cue)",
     )
+    ap.add_argument(
+        "--pitch-filter",
+        choices=("robust", "legacy"),
+        default="robust",
+        help="legacy: formal median variance + hard χ² gate, no reset (pre-fix A/B)",
+    )
+    ap.add_argument(
+        "--nominal-pitch-deg",
+        type=float,
+        default=None,
+        help="Override extrinsics.pitch_deg of --camera (2.5 reproduces the old KITTI nominal)",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
         ap.error("--engine and --depth-dir are mutually exclusive")
 
     _, extr = load_camera_config_yaml(args.camera)
+    if args.nominal_pitch_deg is not None:
+        extr = replace(extr, pitch_rad=float(np.deg2rad(args.nominal_pitch_deg)))
     fusion_cfg = load_fusion_config(args.fusion)
     if args.arbitration is not None:
         fusion_cfg = replace(fusion_cfg, arbitration=args.arbitration)
@@ -126,6 +140,8 @@ def main() -> int:
     road_cfg, aff_cfg, pit_cfg = load_solver_configs(args.fusion)
     if args.pitch_q is not None:
         pit_cfg = replace(pit_cfg, q_rad_per_sqrt_s=float(np.deg2rad(args.pitch_q)))
+    if args.pitch_filter == "legacy":
+        pit_cfg = pit_cfg.legacy()
     trk_cfg = load_tracker_config(args.tracking)
     if args.robust_chi2 is not None:
         trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
@@ -233,6 +249,8 @@ def main() -> int:
             "arbitration": fusion_cfg.arbitration,
             "sigma_pitch_deg": float(np.rad2deg(fusion_cfg.sigma_pitch_rad)),
             "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),
+            "pitch_filter": args.pitch_filter,
+            "nominal_pitch_deg": float(np.rad2deg(extr.pitch_rad)),
             "per_seq": per_seq,
             "pass": ok,
         }
