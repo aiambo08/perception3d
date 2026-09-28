@@ -508,6 +508,63 @@ def test_turn_diagnostics_absent_without_oxts_and_merge_keeps_tracks_apart() -> 
     assert left["n_drift"] == 2 and left["mean_dez_dt_mps"] == pytest.approx((1.0 - 10.0) / 2)
 
 
+def test_tracker3d_r_scale_inflates_measurement_covariance_and_loads_from_yaml() -> None:
+    cov = np.diag([0.04, 0.25])
+    m = [PositionMeasurement(1.0, 20.0, cov, 0)]
+    box = np.array([_box(600.0)])
+    out = {}
+    for r in (1.0, 4.0):
+        trk = Tracker3D(Tracker3DConfig(r_scale=r, byte=ByteTrackConfig(min_hits=1)))
+        tracks = trk.step(0, box, np.array([0.9]), ["car"], m)
+        out[r] = tracks[0].cov[:2, :2]
+    assert out[4.0] == pytest.approx(4.0 * out[1.0])
+    assert load_tracker_config(ROOT / "configs" / "tracking.yaml").r_scale == 1.0
+
+
+@pytest.mark.parametrize(("r_true_scale", "lo", "hi"), [(1.0, 1.7, 2.3), (4.0, 4.0, 12.0)])
+def test_nis_mean_reveals_underestimated_measurement_noise(
+    r_true_scale: float, lo: float, hi: float
+) -> None:
+    """Premise of ``diagnostics.consistency``: with the true R the NIS averages 2 (χ² 2
+    dof); if the real noise is 4× the declared R, it averages ≈ 8."""
+    rng = np.random.default_rng(3)
+    r = np.diag([0.04, 0.25])
+    q, dt = 0.5, 0.1
+    nis: list[float] = []
+    for _ in range(40):
+        pos, vel = np.array([2.0, 25.0]), np.array([0.0, -5.0])
+        kf = CvKalman(pos + rng.multivariate_normal([0, 0], r_true_scale * r), r, 0, q, 15.0)
+        for k in range(1, 60):
+            vel = vel + rng.normal(0.0, np.sqrt(q / dt), 2) * dt
+            pos = pos + vel * dt
+            kf.predict(int(k * dt * 1e9))
+            z = pos + rng.multivariate_normal([0, 0], r_true_scale * r)
+            _, n = kf.update(z, r)
+            if k >= 10:
+                nis.append(n)
+    assert lo < float(np.mean(nis)) < hi
+
+
+def test_consistency_diagnostics_ratio_and_nis_by_age() -> None:
+    res = TrackingKittiResult()
+    nan = float("nan")
+    for age, evz, nis, sig in ((1.5, 2.0, 8.0, 0.5), (1.5, -2.0, 6.0, 0.5), (5.0, 0.5, 2.0, 0.5)):
+        res.diag.append((0.0, evz, 15.0, 0.0, nan, nan, 0.0, 8.0, 0.0, age))
+        res.filter_diag.append((nis, sig, 10.0))
+    res.diag.append((0.0, 0.5, 15.0, 0.0, nan, nan, 0.0, 8.0, 0.0, 5.0))
+    res.filter_diag.append((nan, 0.5, 1.0))  # just re-initialised: no NIS
+    c = res.diagnostics()["consistency"]
+    young, old = c["by_track_age_s"]["1_2"], c["by_track_age_s"]["4_inf"]
+    assert young["ratio"] == pytest.approx(4.0) and young["mean_nis"] == pytest.approx(7.0)
+    assert young["frac_nis_gt_5.99"] == pytest.approx(1.0)
+    assert old["n"] == 2 and old["n_nis"] == 1 and old["ratio"] == pytest.approx(1.0)
+    assert old["mean_n_updates"] == pytest.approx(5.5)
+    assert c["all"]["n"] == 4
+    merged = merge_results([res, TrackingKittiResult(diag=res.diag[:1])])
+    assert "consistency" not in merged.diagnostics()  # misaligned → dropped, not wrong
+    assert "consistency" in merge_results([res, res]).diagnostics()
+
+
 def test_update_batch_robust_bounds_outlier_pull() -> None:
     x = np.array([[0.0, 20.0, 0.0, 0.0]])
     p = np.diag([0.25, 0.25, 1.0, 1.0])[None]

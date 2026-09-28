@@ -175,6 +175,9 @@ Para el sesgo de velocidad en curvas, `eval_tracking_kitti.py` imprime y guarda 
 error frente a `ω·X` y el error por sentido de giro con la deriva del rango
 `d(ez)/dt`. `--oxts-offset-ms` y `--lever-arm` permiten barrer el desfase OXTS↔cámara
 y el brazo de palanca (comandos en `docs/01_plan_fases_mvp.md`, F5).
+`diagnostics.consistency` mide, por edad del track, el NIS medio y el cociente entre el
+error real de V_Z y la σ que predice el filtro; `--r-scale` (escala de `R` de F4) y
+`--q-vehicle` permiten barrer la sintonía.
 
 Seguridad (F6):
 
