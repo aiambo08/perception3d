@@ -170,6 +170,12 @@ nominal de KITTI es 0°. `eval_fusion_kitti.py` y `eval_tracking_kitti.py` acept
 el JSON de F4 cuenta en `pitch.n_discarded` / `pitch.n_frames_gated` las medidas
 descartadas y los frames fuera del gate.
 
+Para el sesgo de velocidad en curvas, `eval_tracking_kitti.py` imprime y guarda en
+`diagnostics.turn` (y en `pooled_diagnostics` con todas las secuencias) el ajuste del
+error frente a `ω·X` y el error por sentido de giro con la deriva del rango
+`d(ez)/dt`. `--oxts-offset-ms` y `--lever-arm` permiten barrer el desfase OXTS↔cámara
+y el brazo de palanca (comandos en `docs/01_plan_fases_mvp.md`, F5).
+
 Seguridad (F6):
 
 ```bash

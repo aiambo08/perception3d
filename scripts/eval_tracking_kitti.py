@@ -40,12 +40,18 @@ from percepcion3d.eval.providers import (  # noqa: E402
     engine_depth_provider,
     npy_depth_provider,
 )
-from percepcion3d.eval.tracking_kitti import gt_kinematics, run_tracking_kitti  # noqa: E402
+from percepcion3d.eval.tracking_kitti import (  # noqa: E402
+    TrackingKittiResult,
+    gt_kinematics,
+    merge_results,
+    run_tracking_kitti,
+)
 from percepcion3d.tracking.ego_motion import (  # noqa: E402
     EgoMotionProvider,
     OxtsEgoMotion,
     ZeroEgoMotion,
     load_oxts_file,
+    resample_oxts,
 )
 from percepcion3d.tracking.tracker3d import Tracker3D, load_tracker_config  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
@@ -55,6 +61,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _p95(p50_p95_p99: list[float]) -> float:
     return p50_p95_p99[1] if p50_p95_p99 else float("nan")
+
+
+def _print_turn(turn: dict[str, Any] | None) -> None:
+    if not turn:
+        return
+    for name in ("vz_err_vs_omega_x", "vx_err_vs_omega_z"):
+        fit = turn[name]
+        if "slope" in fit:
+            print(
+                f"    {name}: slope {fit['slope']:+.3f} intercept {fit['intercept']:+.2f} "
+                f"resid {fit['resid_rms']:.2f} (n={fit['n']})"
+            )
+    for name, st in turn["by_turn_direction"].items():
+        if st["n"]:
+            print(
+                f"    turn {name:>8}: n={st['n']:4d} RMSE {st['rmse']:.2f} "
+                f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f}) · ez "
+                f"{st['mean_ez_m']:+.2f} m ({100 * st['mean_ez_rel']:+.1f} %) · d(ez)/dt "
+                f"{st['mean_dez_dt_mps']:+.2f} → vz bias − drift "
+                f"{st['vz_err_minus_range_drift']:+.2f}"
+            )
 
 
 def main() -> int:
@@ -124,6 +151,13 @@ def main() -> int:
         default=None,
         help="Override extrinsics.pitch_deg of --camera (2.5 reproduces the old KITTI nominal)",
     )
+    ap.add_argument(
+        "--oxts-offset-ms",
+        type=float,
+        default=0.0,
+        help="OXTS clock ahead of the camera (ms): frame i uses the INS state at t_i + offset "
+        "(ego-motion and GT rotation term alike)",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -159,6 +193,7 @@ def main() -> int:
     )
 
     per_seq: dict[str, dict[str, Any]] = {}
+    results: list[TrackingKittiResult] = []
     ok = True
     for seq_id in args.seqs:
         seq = KittiTrackingSequence(args.root, seq_id, max_frames=args.frames)
@@ -172,10 +207,13 @@ def main() -> int:
             oxts_file = args.root / "oxts" / f"{seq_id}.txt"
             if not oxts_file.is_file():
                 ap.error(f"{oxts_file} not found (download data_tracking_oxts.zip or --ego zero)")
-            oxts = load_oxts_file(oxts_file)
+            oxts_raw = load_oxts_file(oxts_file)
             t_ns = src.timestamps_ns
-            n = min(len(t_ns), len(oxts))
-            ego = OxtsEgoMotion(t_ns[:n], oxts[:n], lever_arm_fwd_m=args.lever_arm)
+            n = min(len(t_ns), len(oxts_raw))
+            oxts = oxts_raw[:n]
+            if args.oxts_offset_ms != 0.0:
+                oxts = resample_oxts(oxts, t_ns[:n], round(args.oxts_offset_ms * 1e6))
+            ego = OxtsEgoMotion(t_ns[:n], oxts, lever_arm_fwd_m=args.lever_arm)
         depth = engine_depth
         if args.depth_dir is not None:
             depth = npy_depth_provider(args.depth_dir / seq_id)
@@ -192,6 +230,7 @@ def main() -> int:
         )
         d = res.to_dict()
         per_seq[seq_id] = d
+        results.append(res)
         print(
             f"{seq_id}: vel RMSE {d['rmse_vel_rel_mps']:.3f} m/s (vz {d['rmse_vz_rel_mps']:.3f}, "
             f"n={d['n_vel_samples']}, ref {d['velocity_reference']}) · IDSW {d['id_switches']} "
@@ -227,9 +266,21 @@ def main() -> int:
                     f"    {name:>20}: n={st['n']:4d} RMSE {st['rmse']:.2f} "
                     f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
                 )
+        _print_turn(d["diagnostics"].get("turn"))
         ok &= d["rmse_vel_rel_mps"] <= 1.0
         if args.ego == "oxts":
             ok &= d["static_frac"] >= 0.9
+
+    pooled = merge_results(results).diagnostics()
+    if len(results) > 1:
+        print(f"\npooled ({len(results)} seqs):")
+        for name, st in pooled.get("by_yaw_rate", {}).items():
+            if st["n"]:
+                print(
+                    f"    {name:>20}: n={st['n']:4d} RMSE {st['rmse']:.2f} "
+                    f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
+                )
+        _print_turn(pooled.get("turn"))
 
     depth_mode = (
         "engine" if args.engine else ("npy" if args.depth_dir else "none (geometry+height)")
@@ -251,7 +302,10 @@ def main() -> int:
             "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),
             "pitch_filter": args.pitch_filter,
             "nominal_pitch_deg": float(np.rad2deg(extr.pitch_rad)),
+            "lever_arm_m": args.lever_arm,
+            "oxts_offset_ms": args.oxts_offset_ms,
             "per_seq": per_seq,
+            "pooled_diagnostics": pooled,
             "pass": ok,
         }
         args.json.parent.mkdir(parents=True, exist_ok=True)
