@@ -48,6 +48,7 @@ from percepcion3d.eval.lidar import (  # noqa: E402
 from percepcion3d.io.sources import ImageSequenceSource, KittiSequenceSource  # noqa: E402
 from percepcion3d.runtime.contention import ContentionResult, run_contention  # noqa: E402
 from percepcion3d.runtime.trt_engine import TrtEngine  # noqa: E402
+from percepcion3d.utils.bench_history import archive_report  # noqa: E402
 from percepcion3d.utils.gpu_state import GpuStateSampler, nvml_query_fn  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 from percepcion3d.utils.vram import VramSampler, nvml_sample_fn  # noqa: E402
@@ -288,6 +289,11 @@ def main() -> None:
     ap.add_argument("--pace-hz", type=float, help="pace the frame loop (e.g. 60)")
     ap.add_argument("--no-cuda-graph", action="store_true")
     ap.add_argument("--json", type=Path)
+    ap.add_argument(
+        "--archive",
+        action="store_true",
+        help="also archive the report in data/outputs/bench/<stamp>_<name>.json (F8 history)",
+    )
     args = ap.parse_args()
 
     depth_cfg = load_depth_config(args.config)
@@ -314,6 +320,9 @@ def main() -> None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(results, indent=2), encoding="utf-8")
         print(f"wrote {args.json}")
+        if args.archive:
+            keyed = {f"{r['mode']}_{r['size_hw'][0]}x{r['size_hw'][1]}": r for r in results}
+            print(f"archived {archive_report(keyed, 'depth')}")
 
 
 if __name__ == "__main__":

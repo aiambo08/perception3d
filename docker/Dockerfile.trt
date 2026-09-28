@@ -1,0 +1,50 @@
+# Reproducible TensorRT engine builder (F8). Not a development image.
+#
+# TensorRT engines are tied to the TensorRT major, the CUDA runtime and the GPU
+# architecture, so regenerating them from a pinned image gives the same result
+# on every machine with the same GPU. The image ships only the `runtime` extra
+# (tensorrt-cu12 10.x, cuda-python) plus the package; models, datasets and
+# engines are mounted at run time and never baked in.
+#
+#   docker build -f docker/Dockerfile.trt -t percepcion3d-trt .
+#   docker run --rm --gpus all -v "$PWD/models:/workspace/models" percepcion3d-trt \
+#       models/detector_1024x320.onnx models/detector_1024x320_fp16.engine --precision fp16
+#   docker run --rm --gpus all -v "$PWD/models:/workspace/models" \
+#       -v "$KT:/data/kitti:ro" percepcion3d-trt \
+#       models/detector_1024x320.onnx models/detector_1024x320_int8.engine --precision int8 \
+#       --calib-dir /data/kitti/image_02/0000 /data/kitti/image_02/0001 /data/kitti/image_02/0020 \
+#       --calib-cache models/detector_1024x320_int8.cache
+#
+# Requires the NVIDIA Container Toolkit (`--gpus all`); on WSL2 the Windows
+# driver is passed through by Docker Desktop.
+
+ARG CUDA_TAG=12.6.3-runtime-ubuntu22.04
+FROM nvidia/cuda:${CUDA_TAG}
+
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:/root/.local/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv brings its own CPython 3.11 (the project pins >=3.11,<3.12; Ubuntu 22.04 ships 3.10).
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv python install 3.11 \
+    && uv venv --python 3.11 "$VIRTUAL_ENV"
+
+WORKDIR /workspace
+
+COPY pyproject.toml README.md ./
+COPY src/ src/
+RUN uv pip install -e ".[runtime]"
+
+COPY configs/ configs/
+COPY scripts/export_trt.py scripts/export_trt.sh scripts/
+
+ENTRYPOINT ["python", "scripts/export_trt.py"]
+CMD ["--help"]

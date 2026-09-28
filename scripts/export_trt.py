@@ -18,6 +18,12 @@ Usage::
     # fp32
     uv run python scripts/export_trt.py in.onnx out.engine --precision fp32
 
+    # int8 (F8): entropy calibration on KITTI frames, cache reused on rebuilds
+    uv run python scripts/export_trt.py \
+        models/detector_1024x320.onnx models/detector_1024x320_int8.engine \
+        --precision int8 --calib-dir "$KT/image_02/0000" "$KT/image_02/0001" \
+        --calib-frames 500 --calib-cache models/detector_1024x320_int8.cache
+
 Exit codes: 0 success, 1 build error, 2 argument error.
 """
 
@@ -26,7 +32,16 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from percepcion3d.detection.int8_calibration import (  # noqa: E402
+    CalibrationBatcher,
+    list_calibration_images,
+    make_entropy_calibrator,
+)
 
 
 def _build_engine(
@@ -36,6 +51,7 @@ def _build_engine(
     workspace_mb: int,
     builder_opt_level: int,
     verbose: bool,
+    calibrator_for: Callable[[tuple[int, int]], object] | None = None,
 ) -> None:
     try:
         import tensorrt as trt  # noqa: PLC0415
@@ -77,6 +93,12 @@ def _build_engine(
         config.set_flag(trt.BuilderFlag.FP16)
     if precision == "int8":
         config.set_flag(trt.BuilderFlag.INT8)
+        if calibrator_for is None:
+            print("int8 needs --calib-dir and/or --calib-cache", file=sys.stderr)
+            sys.exit(2)
+        dims = tuple(int(d) for d in network.get_input(0).shape)
+        hw = (dims[1], dims[2]) if len(dims) == 4 and dims[3] == 3 else (dims[2], dims[3])
+        config.int8_calibrator = calibrator_for(hw)
 
     print(f"Building engine (precision={precision}, workspace={workspace_mb} MB) …")
     t0 = time.perf_counter()
@@ -121,11 +143,39 @@ def main() -> None:
         help="Builder optimization level (default: 4)",
     )
     ap.add_argument("--verbose", action="store_true", help="Enable TRT verbose logging")
+    ap.add_argument(
+        "--calib-dir",
+        type=Path,
+        nargs="*",
+        default=[],
+        help="int8: image directories (KITTI image_02/<seq>) sampled for calibration",
+    )
+    ap.add_argument("--calib-frames", type=int, default=500, help="int8: frames to sample")
+    ap.add_argument(
+        "--calib-cache",
+        type=Path,
+        help="int8: calibration cache; reused if it exists (then --calib-dir is optional)",
+    )
     args = ap.parse_args()
 
     if not args.onnx.is_file():
         print(f"ONNX not found: {args.onnx}", file=sys.stderr)
         sys.exit(2)
+
+    calibrator_for: Callable[[tuple[int, int]], object] | None = None
+    if args.precision == "int8":
+        cache = args.calib_cache
+        if args.calib_dir:
+            paths = list_calibration_images(args.calib_dir, args.calib_frames)
+        elif cache is not None and cache.is_file():
+            paths = []
+        else:
+            print("int8 requires --calib-dir (or an existing --calib-cache)", file=sys.stderr)
+            sys.exit(2)
+        print(f"int8 calibration: {len(paths)} frames, cache={cache}")
+
+        def calibrator_for(hw: tuple[int, int]) -> object:
+            return make_entropy_calibrator(CalibrationBatcher(paths, hw, cache))
 
     _build_engine(
         onnx_path=args.onnx,
@@ -134,6 +184,7 @@ def main() -> None:
         workspace_mb=args.workspace_mb,
         builder_opt_level=args.opt_level,
         verbose=args.verbose,
+        calibrator_for=calibrator_for,
     )
 
 

@@ -89,6 +89,7 @@ from percepcion3d.tracking.ego_motion import (  # noqa: E402
     load_oxts_file,
 )
 from percepcion3d.tracking.tracker3d import Tracker3D, load_tracker_config  # noqa: E402
+from percepcion3d.utils.bench_history import archive_report  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 from percepcion3d.utils.vram import VramPeak, VramSampler, nvml_sample_fn  # noqa: E402
 
@@ -155,6 +156,11 @@ def _args() -> argparse.Namespace:
     tel.add_argument("--tel-queue", type=int, default=64)
 
     ap.add_argument("--json", type=Path, default=None)
+    ap.add_argument(
+        "--archive",
+        action="store_true",
+        help="also archive the report in data/outputs/bench/<stamp>_<name>.json (F8 history)",
+    )
     args = ap.parse_args()
     n_src = sum(x is not None for x in (args.kitti_tracking, args.kitti_raw, args.video))
     if n_src != 1:
@@ -435,6 +441,8 @@ def main() -> int:
         }
         args.json.write_text(json.dumps(out, indent=2), encoding="utf-8")
         print(f"wrote {args.json}")
+        if args.archive:
+            print(f"archived {archive_report(out, 'pipeline')}")
     return 0 if all(v is not False for v in verdicts.values()) else 1
 
 
