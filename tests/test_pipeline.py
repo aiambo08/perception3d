@@ -509,3 +509,100 @@ def test_preloaded_source_decodes_once() -> None:
     pre = PreloadedSource(gen(), max_frames=4)
     assert len(pre) == 4 and n == 5  # stops after the first frame past the limit
     assert [f.frame_id for f in pre] == [0, 1, 2, 3] == [f.frame_id for f in pre]
+
+
+# ─── Enqueue order, per-enqueue split, time series ───────────────────────────
+
+
+class _OrderedBoxes:
+    def __init__(self, inner: CallableBoxStage, log: list[str]) -> None:
+        self.inner = inner
+        self.log = log
+
+    def submit(self, fs: FrameStamped) -> _OrderedHandle:
+        self.log.append(f"det.submit {fs.frame_id}")
+        return _OrderedHandle(self.inner.submit(fs).wait(), self.log, fs.frame_id)
+
+
+class _OrderedHandle:
+    def __init__(self, b: Boxes2D, log: list[str], k: int) -> None:
+        self.b = b
+        self.log = log
+        self.k = k
+
+    def wait(self) -> Boxes2D:
+        self.log.append(f"det.wait {self.k}")
+        return self.b
+
+
+class _OrderedDepth(FakeDepthStage):
+    def __init__(self, scene: SyntheticScene, clock: FakeClock, log: list[str]) -> None:
+        super().__init__(scene, clock, latency_ms=0.0)
+        self.log = log
+
+    def infer_stamped(self, fs: FrameStamped) -> FakeDepthHandle:
+        self.log.append(f"depth {fs.frame_id}")
+        return super().infer_stamped(fs)
+
+
+@pytest.mark.parametrize("depth_first", [False, True])
+def test_enqueue_order_detector_first_by_default(depth_first: bool) -> None:
+    scene = _scene()
+    clock = FakeClock()
+    log: list[str] = []
+    cfg = PipelineConfig(
+        frame_hz=30.0,
+        cadence=DepthCadenceConfig(n_init=2, n_min=2, n_max=2),
+        depth_first=depth_first,
+    )
+    pipe = _pipeline(scene, clock, _OrderedDepth(scene, clock, log), cfg=cfg)
+    pipe.boxes = _OrderedBoxes(_scene_boxes(scene), log)
+    _feed(pipe, _frames(scene, 3), clock, loop_ms=33.0)
+    if depth_first:
+        assert log[:3] == ["depth 0", "det.submit 0", "det.wait 0"]
+    else:
+        assert log[:3] == ["det.submit 0", "depth 0", "det.wait 0"]
+    assert log[3:5] == ["det.submit 1", "det.wait 1"]  # frame 1: no depth due (n = 2)
+    assert "depth 2" in log
+
+
+def test_stats_split_by_depth_enqueue() -> None:
+    scene = _scene()
+    clock = FakeClock()
+    cfg = PipelineConfig(frame_hz=30.0, cadence=DepthCadenceConfig(n_init=3, n_min=3, n_max=3))
+    depth = FakeDepthStage(scene, clock, latency_ms=10.0)
+    pipe = _pipeline(scene, clock, depth, cfg=cfg)
+    _feed(pipe, _frames(scene, 12), clock, loop_ms=33.0)
+    st = pipe.stats
+    assert len(st.boxes_ms_depth) == len(depth.submitted) == 4
+    assert len(st.boxes_ms_no_depth) == 8
+    assert len(st.e2e_alert_ms_depth) + len(st.e2e_alert_ms_no_depth) == st.frames
+    d = st.to_dict()["by_depth_enqueue"]
+    assert d["boxes_ms"]["depth"]["n"] == 4 and d["e2e_alert_ms"]["no_depth"]["n"] == 8
+
+
+def test_run_series_one_row_per_window_with_drops() -> None:
+    scene = _scene()
+    clock = FakeClock()
+    cfg = PipelineConfig(frame_hz=10.0, cadence=DepthCadenceConfig(n_init=1), series_period_s=1.0)
+    pipe = _pipeline(scene, clock, FakeDepthStage(scene, clock, latency_ms=0.0), cfg=cfg)
+    drops = [0]
+
+    def gen() -> Iterator[tuple[FrameStamped, int]]:
+        for fs in _frames(scene, 25):
+            yield fs, clock()
+            clock.advance(100.0)
+            if fs.frame_id % 5 == 4:
+                drops[0] += 1
+
+    st = pipe.run(gen(), dropped=lambda: drops[0])
+    rows = st.series
+    assert [r["t_s"] for r in rows] == [0.0, 1.0, 2.0]
+    assert [r["frames"] for r in rows] == [10.0, 10.0, 5.0]
+    assert sum(r["frames"] for r in rows) == st.frames
+    assert sum(r["dropped"] for r in rows) == st.dropped == 5
+    assert all(r["e2e_max_ms"] >= r["e2e_p99_ms"] >= r["e2e_p50_ms"] for r in rows)
+    assert rows[1]["depth_maps"] >= 1
+    assert st.to_dict()["series"] == rows
+    with pytest.raises(ValueError):
+        _pipeline(scene, clock, None, cfg=PipelineConfig(series_period_s=0.0))

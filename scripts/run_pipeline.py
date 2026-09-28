@@ -138,6 +138,11 @@ def _args() -> argparse.Namespace:
         "--depth-n", type=int, nargs=3, metavar=("INIT", "MIN", "MAX"), default=(2, 1, 8)
     )
     mdl.add_argument("--depth-margin", type=float, default=1.1)
+    mdl.add_argument(
+        "--depth-first",
+        action="store_true",
+        help="Enqueue depth before the detector (R3 worst case); default: detector first",
+    )
 
     tel = ap.add_argument_group("telemetry")
     tel.add_argument("--telemetry", choices=("none", "null", "jsonl", "rerun"), default="none")
@@ -330,6 +335,7 @@ def main() -> int:
                 n_min=n_min, n_max=n_max, n_init=n_init, margin=args.depth_margin
             ),
             ego_front_m=safety_cfg.ego_front_m,
+            depth_first=args.depth_first,
         )
         # Warm up the engines (CUDA graphs, allocations) outside the measured loop.
         for _ in range(3):
@@ -384,6 +390,20 @@ def main() -> int:
             f"depth: {d['maps']} maps = {d['hz']:.1f} Hz, n_final {d['n_final']}, skipped "
             f"{d['skipped']}, age P95 {d['age_ms']['p95']:.1f} ms, lag P95 "
             f"{d['lag_frames']['p95']:.1f} frames, turnaround P95 {d['turnaround_ms']['p95']:.1f} ms"
+        )
+    bd = st["by_depth_enqueue"]
+    for key in ("boxes_ms", "e2e_alert_ms"):
+        w, wo = bd[key]["depth"], bd[key]["no_depth"]
+        print(
+            f"{key} with depth enqueued (n={w['n']}): P95 {w['p95']:.2f} P99 {w['p99']:.2f} | "
+            f"without (n={wo['n']}): P95 {wo['p95']:.2f} P99 {wo['p99']:.2f}"
+        )
+    if st["series"]:
+        worst = max(st["series"], key=lambda r: r["e2e_p99_ms"])
+        print(
+            f"worst {worst['t_s']:.0f} s window: e2e P99 {worst['e2e_p99_ms']:.2f} ms, max "
+            f"{worst['e2e_max_ms']:.2f} ms, dropped {worst['dropped']:.0f}, "
+            f"{worst['frames']:.0f} frames"
         )
     if st["telemetry_ms"]["n"]:
         t = st["telemetry_ms"]

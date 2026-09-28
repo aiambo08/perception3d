@@ -81,6 +81,8 @@ def test_runner_paced_loop_gt_boxes_jsonl(kitti_root: Path, tmp_path: Path) -> N
     )
     rep = json.loads(out.read_text(encoding="utf-8"))
     st = rep["stats"]
+    assert st["series"] and sum(r["frames"] for r in st["series"]) == st["frames"]
+    assert "boxes_ms" in st["by_depth_enqueue"]
     assert rep["delivery"] == "paced_loop" and rep["image_hw"] == [H, W]
     assert st["frames"] == N_FRAMES and st["dropped"] == 0
     assert st["depth"]["maps"] == 0 and rep["verdicts"]["depth_hz"] is None
