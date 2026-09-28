@@ -558,18 +558,54 @@ uv run python scripts/eval_safety_synthetic.py --seeds 10 --json reports/f6_synt
 
 ---
 
-## F7 · Integración dual-rate y telemetría
+## F7 · Integración dual-rate y telemetría — ✔ implementado (CPU); DoD GPU [medir]
 
 **Alcance**
-- `runtime/pipeline.py`: lazo mono-hilo con dos streams (R5), `frame_id`
-  sellado extremo a extremo, política `depth_every_n_frames` adaptativa,
-  buffer de cajas por frame para muestrear mapas antiguos (R6).
-- `runtime/cuda.py`: envoltorio de `cuda-python` (streams con prioridad,
-  events, pinned buffers, H2D/D2H asíncronos).
-- `utils/logger.py` → `telemetry/rerun_sink.py`: visor externo, tiempos de
-  captura, tracks 3D, cajas, mapa de profundidad submuestreado cada N frames,
-  escalares de latencia por etapa.
-- `scripts/run_pipeline.sh` operativo sobre KITTI y vídeo.
+- `runtime/pipeline.py`: `Pipeline.process(fs, t_ingress)` mono-hilo. Por
+  frame: si `DepthCadence.due(k)` y no hay profundidad en vuelo, se encola
+  `depth.infer_stamped(fs)` (stream propio, nunca se espera aquí; si está en
+  vuelo se cuenta `skipped` y `n` sube 1); después `boxes.submit(fs).wait()`
+  (detector reactivo o cajas GT), `_poll_depth()` recoge el mapa si su evento
+  ya terminó, `BoxHistory` guarda las cajas del frame `k`, y la fusión recibe
+  el mapa más reciente $j \le k$ junto con las cajas *del frame j* (R6:
+  `net_boxes`; `MetricFusionStage` infla $\sigma_n$ con `net_age_sigma_mps ·
+  edad`). Tracker (Δt real desde `t_capture_ns`) → `kinematics_from_track` →
+  `safety.step` → `FrameResult` (`frame_id`, `depth_frame_id`, `depth_lag_frames`,
+  `depth_age_ms`, timings por etapa) → `sink.log()`.
+- `DepthCadence`: `n` adaptativo en `[n_min, n_max]` desde el turnaround EMA
+  de la red: `n = ceil(margin · turnaround / periodo)`; baja de uno en uno
+  cuando la red se acelera, sube de golpe cuando hay saltos.
+- Entrega de frames: `FramePacer` (lazo con ritmo, descarta frames rezagados)
+  y variante con hilo de captura (`start_pump` → `LatestFrameSlot` →
+  `iter_slot`, latest-wins con contador de descartes). Mismo `Pipeline` y
+  mismo informe para ambas. `LoopedSource`/`LoopedEgoMotion` repiten una
+  secuencia con timestamps continuos (pliegan OXTS al tramo original) para
+  sostener los 5 min del DoD.
+- `runtime/cuda.py`: `CudaRuntime` (streams con prioridad alta/baja, events
+  con/sin timing, `PinnedBuffer`, `copy_h2d_async`/`copy_d2h_async`),
+  `cuda_check` sobre la convención `(err, *values)` de `cuda-python`; import
+  perezoso, `TrtEngine` lo usa (mismo comportamiento, CUDA Graph incluido).
+- `telemetry/rerun_sink.py` (sustituye a `utils/logger.py`): `AsyncSink`
+  (deque acotada, *drop-oldest*, worker propio; `log()` nunca bloquea ni
+  lanza, contadores `logged/emitted/dropped/errors`), `build_record` desde
+  `FrameResult` (cajas, tracks con σ y nivel, alertas, latencias, edad del
+  mapa, profundidad submuestreada cada N frames), backends `Rerun`
+  (import dentro de `__init__`; spawn / connect / save `.rrd`), `Jsonl`,
+  `Null`, `Recording` (tests).
+- `scripts/run_pipeline.py` + `run_pipeline.sh`: KITTI tracking (GT o
+  detector, `--ego zero|oxts`), KITTI raw, vídeo; `--hz --loop --duration
+  --max-frames --capture-thread --depth-n INIT MIN MAX --telemetry
+  none|null|jsonl|rerun --json`. El JSON trae `stats`, `stages`, `telemetry`,
+  `vram_peak_over_baseline_mb` y `verdicts` del DoD (`null` cuando no es
+  medible, p. ej. VRAM sin GPU).
+
+**Medido en CPU (tests + arnés con cajas GT, sin red):** `frame_id` y
+timestamps se propagan sin mezclar frames; la profundidad nunca bloquea el
+lazo y el mapa usado siempre es de un frame $j \le k$ con sus propias cajas;
+`n` sube/baja con el turnaround y respeta `[n_min, n_max]`; el sink descarta
+lo antiguo con backend lento o roto y `log()` cuesta µs; cierre limpio con
+profundidad en vuelo y con el hilo de captura; ambas variantes de entrega
+producen el mismo informe. Nada de esto sustituye al DoD siguiente.
 
 **DoD (en la GPU objetivo, [medir])**
 - Lazo reactivo (captura → alerta): P99 ≤ 16.7 ms sostenido 5 min.

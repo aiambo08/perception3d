@@ -40,6 +40,7 @@ noise:
   sigma_row_px: 1.5         # σ de la fila de contacto (jitter del detector + ambigüedad del contacto)
   sigma_col_px: 1.5
   net_rel_sigma: 0.05       # k: error relativo de 1/Z de la red tras la corrección afín
+  net_age_sigma_mps: 5.0    # σ extra de Z_n por segundo de antigüedad del mapa (R6, lazo dual-rate)
 
 gates:
   z_min_m: 1.0

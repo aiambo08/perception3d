@@ -31,8 +31,12 @@ en $[X, Z, V_X, V_Z]$ con $\Delta t$ variable, $R_k$ desde F4 y mediciones
 retrasadas, ego-motion `Zero`/`Constant`/`Oxts`, velocidad relativa y
 etiqueta estático/móvil) y F6 (seguridad: $t_{CPA}$/$d_{CPA}$ con σ,
 $TTC_{low}$ conservador, compuertas de proximidad/trayectoria y máquina de
-alertas pura con histéresis, dwell y decaimiento) implementadas y
-testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
+alertas pura con histéresis, dwell y decaimiento) y F7 (integración: lazo
+dual-rate mono-hilo detector/profundidad con `frame_id` sellado, cadencia de
+profundidad adaptativa, buffer de cajas por frame para mapas antiguos,
+envoltorio `cuda-python` con streams por prioridad, telemetría asíncrona con
+cola acotada y Rerun perezoso, runner KITTI/vídeo con informe de DoD)
+implementadas y testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
 recall, Spearman) y el DoD KITTI de F4 (AbsRel por bins) están pendientes de
 medirse en la GPU objetivo; los DoD sintéticos y de coste CPU de F4 se cumplen
 en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
@@ -40,8 +44,9 @@ en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
 F5 en KITTI cumple estáticos, ID switches y coste CPU, pero no el RMSE de
 velocidad en tráfico urbano (0000/0001: 1.2–1.5 m/s frente a 1.0) por un
 sesgo del pitch del cue de suelo de F4 — limitación documentada en
-`docs/01_plan_fases_mvp.md`. `runtime/pipeline.py` es un esqueleto pendiente
-de F7.
+`docs/01_plan_fases_mvp.md`. El DoD de F7 (P99 captura→alerta ≤ 16.7 ms,
+profundidad ≥ 25 Hz, antigüedad P95 ≤ 70 ms, VRAM ≤ 3.5 GB) sólo puede
+medirse en la GPU objetivo con `scripts/run_pipeline.sh`.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -95,11 +100,32 @@ Seguridad (F6):
 uv run python scripts/eval_safety_synthetic.py --seeds 10 --json out/f6_synth.json  # batería de alertas + determinismo
 ```
 
+Lazo integrado y telemetría (F7):
+
+```bash
+# Arnés CPU (cajas GT, sin red): latencias, cadencia y telemetría JSONL, sin GPU
+uv run python scripts/run_pipeline.py --kitti-tracking <kitti_tracking/training> --seq 0001 \
+    --boxes gt --hz 60 --loop --duration 20 --telemetry jsonl --json out/f7_cpu.json
+# DoD en la GPU objetivo: engines F2/F3, 5 min en bucle, visor Rerun (uv pip install -e ".[runtime]")
+bash scripts/run_pipeline.sh kitti-tracking <kitti_tracking/training> 0001 --ego oxts
+# Variante con hilo de captura (LatestFrameSlot) si el P99 falla por CPU; sin visor
+CAPTURE_THREAD=1 TELEMETRY=none bash scripts/run_pipeline.sh kitti-tracking <kitti_tracking/training> 0001
+# Vídeo cualquiera (intrínsecas de --camera) o KITTI raw
+bash scripts/run_pipeline.sh video <clip.mp4> --camera configs/camera_kitti.yaml
+bash scripts/run_pipeline.sh kitti-raw <2011_09_26_drive_0005_sync>
+```
+
+El informe JSON (`reports/f7_<modo>.json`) trae `stats` (P50/P95/P99 de
+captura→alerta, Hz de profundidad, antigüedad y retraso del mapa, descartes,
+coste de `log()`), `stages` (`StageTimer`), `telemetry` (encolados / emitidos /
+descartados / errores) y `verdicts` por criterio del DoD (`null` = no medible
+en esa configuración, p. ej. VRAM sin GPU).
+
 ## Desarrollo
 
 ```bash
 uv venv --python 3.11 && uv pip install -e ".[dev]"      # núcleo CPU + herramientas
-ruff check src tests && ruff format --check src tests
+ruff check src scripts tests && ruff format --check src scripts tests
 mypy src tests
 pytest tests -m "not slow and not gpu"
 ```
