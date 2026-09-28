@@ -25,6 +25,8 @@ data/raw/*
 !data/raw/.gitkeep
 data/outputs/*
 !data/outputs/.gitkeep
+# benchmark history (small JSON, versioned on purpose)
+!data/outputs/bench/
 *.pcap
 *.bag
 

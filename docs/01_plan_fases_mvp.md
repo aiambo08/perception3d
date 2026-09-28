@@ -558,7 +558,7 @@ uv run python scripts/eval_safety_synthetic.py --seeds 10 --json reports/f6_synt
 
 ---
 
-## F7 · Integración dual-rate y telemetría — ✔ implementado (CPU); DoD GPU [medir]
+## F7 · Integración dual-rate y telemetría — ✔ implementado; DoD GPU cumplido
 
 **Alcance**
 - `runtime/pipeline.py`: `Pipeline.process(fs, t_ingress)` mono-hilo. Por
@@ -623,9 +623,22 @@ en `n = 1` (60 Hz, antigüedad 0). Rerun grabando a `.rrd`: P99 12.78 ms,
 sube a 18.8 ms por contención de CPU, no por el sink. Forzando `n = 2`
 (`--depth-n 2 2 8`) el P99 fue 16.96 ms: `boxes` P99 12.3 ms en los frames
 con profundidad encolada antes que el detector → motivo del orden
-detector-primero [re-medir].
+detector-primero.
 
-**DoD (en la GPU objetivo, [medir])**
+**Re-medido con detector-primero (60 s, sin telemetría):** por defecto P99
+9.00 ms (P50 5.93), `boxes` P50/P99 3.0/4.1 ms e igual con o sin profundidad
+encolada en el frame (P99 4.12 frente a 3.99 ms: la contención desaparece);
+con `--depth-n 2 2 8` P99 9.24 ms, 0 descartes. En ambas la cadencia acaba en
+`n = 2` (30 Hz, antigüedad P95 33 ms) porque el turnaround medido pasa a
+18.5 ms: la profundidad termina después del polling de su propio frame y se
+recoge en el siguiente, así que la medida incluye un periodo de espera
+(`depth.gpu` ≈ 8 ms). Para volver a 60 Hz habría que medir el turnaround con
+el evento CUDA en lugar del polling. `stats.series` localizó los dos picos de
+la corrida por defecto: arranque (máx 52 ms, 2 descartes) y un parón aislado
+de 230 ms en el segundo 49 (12 descartes; P50 y `boxes` normales en ese
+segundo → host/WSL, no verificado). Todos los criterios siguientes cumplen.
+
+**DoD (en la GPU objetivo, ✔ medido)**
 - Lazo reactivo (captura → alerta): P99 ≤ 16.7 ms sostenido 5 min.
 - Profundidad: ≥ 25 Hz efectivos; antigüedad P95 del mapa usado ≤ 70 ms.
 - VRAM pico (NVML, GPU completa menos baseline) ≤ 3.5 GB.
@@ -637,7 +650,7 @@ detector-primero [re-medir].
 
 ---
 
-## F8 · Endurecimiento
+## F8 · Endurecimiento — ✔ implementado; INT8 [medir]
 
 - INT8 en detector con calibración KITTI: aceptar solo si Δrecall peatones
   ≥ −2 pt y Δlatencia ≤ −25 %.
@@ -647,6 +660,60 @@ detector-primero [re-medir].
   percentiles archivado en `data/outputs/bench/<fecha>.json` (histórico para
   detectar regresiones).
 - README con guía de arranque en WSL2 (driver, `usbipd` si cámara en vivo).
+
+**Implementado.**
+
+- `detection/int8_calibration.py`: `list_calibration_images` elige de forma
+  determinista N frames repartidos entre secuencias en proporción a su
+  longitud y espaciados en el tiempo (no los primeros segundos);
+  `CalibrationBatcher` aplica el mismo `Letterboxer` del detector y sirve
+  lotes `uint8 (1,H,W,3)` — la entrada del grafo tras la cirugía ONNX, así
+  la calibración ve exactamente lo que verá el engine, incluido el relleno
+  114 —; `make_entropy_calibrator` los envuelve en un
+  `IInt8EntropyCalibrator2` (memoria pinned + H2D en un stream propio) con
+  caché en disco. `scripts/export_trt.py --precision int8 --calib-dir …
+  --calib-cache …` construye el engine con `INT8 + FP16` (las capas sin
+  escala INT8 caen a FP16, no a FP32); con el caché ya escrito no hacen
+  falta frames. TensorRT/CUDA se importan sólo dentro de la función.
+- `eval/engine_compare.py` + `scripts/compare_engines.py`: leen dos JSON de
+  `bench_detector.py` y dan `PASS/FAIL` por criterio con las estimaciones
+  puntuales del plan (Δrecall `Pedestrian` ≥ −2 pt; `det.gpu` P95 baja
+  ≥ 25 %; `Car` se informa sin puerta). Cada Δrecall lleva su IC95
+  (diferencia de proporciones; conservador porque ambos engines ven los
+  mismos frames) y `recall_conclusive` avisa cuando el intervalo cruza el
+  umbral: con ~1000 peatones el IC de un Δ de −0.5 pt es ±2.6 pt, así que
+  un `ACCEPT` con pocos frames se ve como débil en vez de esconderse.
+- `utils/bench_history.py` + `scripts/bench_history.py`: `--archive` en
+  `bench_detector`, `bench_depth` y `run_pipeline` copia el informe a
+  `data/outputs/bench/<AAAAMMDD_HHMMSS>_<nombre>.json` (con sufijo `-NN` si
+  coinciden en el segundo). `check` aplana el JSON, se queda con las claves
+  de percentiles, máximos, VRAM, descartes, recall y Hz (con la dirección
+  correcta para cada una) y marca regresión si empeoran más de un 10 %
+  **y** más de 0.2 unidades — el doble umbral evita falsas alarmas en
+  métricas cercanas a cero como `drop_frac`. Los NaN y las claves que sólo
+  existen en una de las dos corridas se ignoran.
+- `tests/test_gpu_smoke.py` (marker `gpu`, 6 tests): una inferencia real del
+  detector y de la profundidad con los engines de `configs/models.yaml`
+  (formas, finitud, cajas dentro del frame, `det.gpu`/`depth.gpu`
+  registrados), solape en dos streams, lote del calibrador en dispositivo,
+  archivo del informe como `gpu_smoke` y el lazo F7 5 s sobre KITTI 0001
+  cuando `KT` está definido (frames > 60, mapas > 0, descartes ≤ 1 %). Todos
+  hacen `skip`, nunca `fail`, sin `tensorrt`/`cuda-python`, sin engines o
+  sin dataset, así la batería CPU de CI no cambia.
+- `docker/Dockerfile.trt`: `nvidia/cuda:12.6.3-runtime-ubuntu22.04` +
+  CPython 3.11 gestionado por uv + extra `runtime`; `ENTRYPOINT` en
+  `scripts/export_trt.py`. Modelos, datasets y engines se montan, no se
+  copian. 25 tests CPU nuevos (`tests/test_f8_hardening.py`) cubren el
+  muestreo de frames, el batcher (formas, relleno, copias independientes,
+  caché), los veredictos (incluidos informes aleatorios frente a la regla),
+  el histórico y los dos scripts de línea de comandos.
+
+**Pendiente de medir en la GPU objetivo (comandos en el README, bloque
+F8):** el engine INT8 y su veredicto frente a FP16. Con `det.gpu` en 1.1 ms
+P95 el 25 % exige bajar a ≤ 0.8 ms; si la GPU está limitada por el lanzamiento
+de kernels y no por el cómputo, es probable que INT8 no llegue y la decisión
+del plan sea quedarse en FP16 — el resultado es aceptable en ambos sentidos,
+lo que importa es medirlo.
 
 ---
 

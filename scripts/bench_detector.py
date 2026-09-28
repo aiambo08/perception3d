@@ -62,6 +62,7 @@ from percepcion3d.eval.detection import (  # noqa: E402
 )
 from percepcion3d.eval.kitti import load_kitti_tracking_labels  # noqa: E402
 from percepcion3d.io.sources import ImageSequenceSource, VideoFileSource  # noqa: E402
+from percepcion3d.utils.bench_history import archive_report  # noqa: E402
 from percepcion3d.utils.gpu_state import GpuStateSampler, nvml_query_fn  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 from percepcion3d.utils.vram import VramSampler, nvml_sample_fn  # noqa: E402
@@ -162,6 +163,11 @@ def main() -> None:
     ap.add_argument("--no-cuda-graph", action="store_true")
     ap.add_argument("--no-priority", action="store_true", help="default-priority CUDA stream")
     ap.add_argument("--json", type=Path)
+    ap.add_argument(
+        "--archive",
+        action="store_true",
+        help="also archive the report in data/outputs/bench/<stamp>_<name>.json (F8 history)",
+    )
     ap.add_argument("--csv", type=Path)
     args = ap.parse_args()
 
@@ -267,6 +273,8 @@ def main() -> None:
         }
         args.json.write_text(json.dumps(out, indent=2), encoding="utf-8")
         print(f"wrote {args.json}")
+        if args.archive:
+            print(f"archived {archive_report(out, 'detector')}")
     if args.csv:
         timer.to_csv(args.csv)
 

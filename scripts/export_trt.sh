@@ -8,6 +8,8 @@
 # profiles are needed; the uint8 NHWC input + Cast is parsed natively by TRT ≥ 8.5.
 # trtexec's own timing loop is only a sanity check; the runtime numbers come
 # from scripts/bench_detector.py (TrtEngine with its own CUDA Graph).
+# int8 needs CALIB_CACHE, the calibration cache written by
+# scripts/export_trt.py --precision int8 --calib-dir ... (F8).
 set -euo pipefail
 
 ONNX=${1:?onnx path}

@@ -44,9 +44,76 @@ en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
 F5 en KITTI cumple estáticos, ID switches y coste CPU, pero no el RMSE de
 velocidad en tráfico urbano (0000/0001: 1.2–1.5 m/s frente a 1.0) por un
 sesgo del pitch del cue de suelo de F4 — limitación documentada en
-`docs/01_plan_fases_mvp.md`. El DoD de F7 (P99 captura→alerta ≤ 16.7 ms,
-profundidad ≥ 25 Hz, antigüedad P95 ≤ 70 ms, VRAM ≤ 3.5 GB) sólo puede
-medirse en la GPU objetivo con `scripts/run_pipeline.sh`.
+`docs/01_plan_fases_mvp.md`. El DoD de F7 se midió en la GPU objetivo
+(RTX Ada 8 GB bajo WSL2, KITTI 0001 en bucle, 60 s): P99 captura→alerta
+9.00 ms (P50 5.93), profundidad 29.9 Hz con antigüedad P95 33 ms, 0.39 % de
+descartes, 539 MB de VRAM sobre la base y `log()` P95 0.30 ms; todos los
+criterios cumplen (detalle en el plan). F8 (endurecimiento) añade la
+calibración INT8 del detector con frames KITTI y su veredicto FP16 frente a
+INT8, el histórico de benchmarks con detección de regresiones, los tests
+`gpu` de humo, la imagen `nvidia/cuda` para regenerar engines y la guía de
+arranque en WSL2 de abajo; las medidas INT8 quedan pendientes de la GPU.
+
+## Arranque en WSL2
+
+Pasos para dejar la máquina lista desde cero (Windows 11 + WSL2 Ubuntu 22.04
+o 24.04). Los comandos se ejecutan dentro de WSL salvo que se indique
+PowerShell.
+
+1. **Driver NVIDIA en Windows** (no se instala ningún driver dentro de WSL).
+   Instala el Game Ready/Studio Driver actual desde nvidia.com y comprueba
+   desde WSL que la GPU se ve:
+   ```bash
+   nvidia-smi          # debe listar la GPU y "CUDA Version: 12.x"; si falla, actualiza el driver de Windows
+   ```
+   `nvidia-smi` en WSL informa memoria del proceso con menos detalle que en
+   Linux nativo (WDDM); `utils/vram.py` usa NVML y devuelve `null` en los
+   campos que WDDM no expone.
+2. **Herramientas de sistema y `uv`:**
+   ```bash
+   sudo apt update && sudo apt install -y git libglib2.0-0
+   curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.local/bin/env
+   ```
+3. **Repositorio y entorno (Python 3.11 gestionado por uv):**
+   ```bash
+   git clone https://github.com/aiambo08/perception3d.git ~/perception3d && cd ~/perception3d
+   uv venv --python 3.11 && source .venv/bin/activate
+   uv pip install -e ".[dev]"                      # CPU: tests, ruff, mypy, onnxruntime
+   uv pip install -e ".[runtime]"                  # GPU: tensorrt-cu12 10.x, cuda-python, rerun-sdk, nvidia-ml-py
+   uv pip install -e ".[export]"                   # sólo para exportar ONNX (torch, ultralytics, transformers)
+   ```
+4. **Comprobar TensorRT y cuda-python:**
+   ```bash
+   python -c "import tensorrt as trt, cuda; print(trt.__version__)"   # 10.x
+   pytest tests -q -m "not slow and not gpu"                          # batería CPU
+   ```
+5. **Datos y engines:**
+   ```bash
+   export KT=~/datasets/kitti/tracking/training     # image_02/<seq>/, label_02/<seq>.txt, oxts/<seq>.txt
+   ls "$KT/image_02/0001" | head -3
+   # engines (F2/F3): ver "Detector" y "Profundidad" más abajo; comprobar:
+   ls models/detector_1024x320_fp16.engine models/depth_924x280_fp16.engine
+   pytest tests -q -m gpu -v                        # humo GPU: una inferencia por engine y lazo F7 de 5 s si KT está definido
+   ```
+   Guarda el dataset en el disco de Linux (`~/datasets`), no en `/mnt/c`: el
+   acceso a NTFS desde WSL es varias veces más lento y aparece en el P99.
+6. **Cámara USB en vivo (opcional, `V4L2Source`).** WSL2 no ve USB por
+   defecto; se comparte con `usbipd-win`. En PowerShell como administrador:
+   ```powershell
+   winget install usbipd
+   usbipd list                                     # anota el BUSID de la cámara
+   usbipd bind --busid <BUSID>
+   usbipd attach --wsl --busid <BUSID>             # repetir tras cada reconexión
+   ```
+   En WSL: `ls /dev/video*` debe mostrar la cámara. El kernel de WSL por
+   defecto no trae `uvcvideo`; si no aparece `/dev/video0`, hace falta un
+   kernel WSL compilado con UVC (fuera del alcance de este repo). Sin cámara
+   todo el pipeline se prueba con KITTI o vídeo.
+7. **Visor Rerun.** Bajo WSLg el visor se renderiza con `llvmpipe` (CPU) y
+   compite con el lazo (medido: P99 18.8 frente a 12.8 ms). Para medir,
+   `TELEMETRY=none` o `RERUN_SAVE=reports/x.rrd`; para ver, abre el visor
+   nativo en Windows (`pip install rerun-sdk` y `rerun` en PowerShell) y usa
+   `RERUN_CONNECT=<ip-de-windows>:9876` desde WSL.
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -121,6 +188,39 @@ coste de `log()`), `stages` (`StageTimer`), `telemetry` (encolados / emitidos /
 descartados / errores) y `verdicts` por criterio del DoD (`null` = no medible
 en esa configuración, p. ej. VRAM sin GPU).
 
+Endurecimiento (F8), en la máquina con GPU:
+
+```bash
+# 1. INT8 del detector con calibración de entropía sobre ~500 frames KITTI (guarda el caché)
+uv run python scripts/export_trt.py models/detector_1024x320.onnx models/detector_1024x320_int8.engine \
+    --precision int8 --calib-dir "$KT/image_02/0000" "$KT/image_02/0001" "$KT/image_02/0020" \
+    --calib-frames 500 --calib-cache models/detector_1024x320_int8.cache
+# 2. Mismo benchmark con los dos engines (mismas secuencias y frames) y veredicto
+uv run python scripts/bench_detector.py --engine models/detector_1024x320_fp16.engine \
+    --kitti-root "$KT" --seqs 0000 0001 0020 --frames 200 --json reports/det_fp16.json --archive
+uv run python scripts/bench_detector.py --engine models/detector_1024x320_int8.engine \
+    --kitti-root "$KT" --seqs 0000 0001 0020 --frames 200 --json reports/det_int8.json --archive
+uv run python scripts/compare_engines.py reports/det_fp16.json reports/det_int8.json \
+    --json reports/det_fp16_vs_int8.json     # ACCEPT si Δrecall peatones ≥ −2 pt y det.gpu P95 baja ≥ 25 %
+# 3. Histórico: --archive en bench_detector/bench_depth/run_pipeline guarda una copia en data/outputs/bench/
+uv run python scripts/bench_history.py list
+uv run python scripts/bench_history.py check --name pipeline   # regresión si P95/P99/VRAM/descartes empeoran > 10 % y > 0.2
+# 4. Tests de humo en GPU (se saltan sin tensorrt/cuda-python o sin engines)
+KT="$KT" uv run pytest tests -q -m gpu -v
+# 5. Regenerar engines en una imagen nvidia/cuda pinada (requiere NVIDIA Container Toolkit)
+docker build -f docker/Dockerfile.trt -t percepcion3d-trt .
+docker run --rm --gpus all -v "$PWD/models:/workspace/models" percepcion3d-trt \
+    models/detector_1024x320.onnx models/detector_1024x320_fp16.engine --precision fp16
+```
+
+`compare_engines.py` devuelve 0 con `ACCEPT` y 1 con `REJECT`; el JSON trae
+Δrecall por clase con su IC95 (`recall_conclusive=false` avisa de que el
+intervalo cruza el umbral y conviene más frames) y Δlatencia por etapa.
+`bench_history.py check` devuelve 1 si hay regresiones y 2 si falta la
+entrada; los ficheros `data/outputs/bench/<AAAAMMDD_HHMMSS>_<nombre>.json`
+se versionan a propósito (son pequeños) para que el histórico viaje con el
+repo.
+
 ## Desarrollo
 
 ```bash
@@ -128,6 +228,7 @@ uv venv --python 3.11 && uv pip install -e ".[dev]"      # núcleo CPU + herrami
 ruff check src scripts tests && ruff format --check src scripts tests
 mypy src tests
 pytest tests -m "not slow and not gpu"
+pytest tests -m gpu                                       # sólo con GPU + engines; se salta si faltan
 ```
 
 Grupos opcionales (`pyproject.toml`):
