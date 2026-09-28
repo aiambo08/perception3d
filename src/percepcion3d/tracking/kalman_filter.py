@@ -31,6 +31,18 @@ converted-measurement design I of ``docs/00_analisis_critico.md`` §3.4). A
 measurement ``lag`` seconds older than the state (depth map from an earlier
 frame, R6) is applied by retrodiction: ``z = p − V·lag + w`` with
 ``H = [I, −lag·I]`` and ``R ← R + q·lag³/3·I``.
+
+Optional range-scale bias (5-state filter, ``x = [X, Z, V_X, V_Z, b]``): the monocular
+range error of F4 is correlated in time (a slowly drifting scale of the depth/ground fit),
+which a white-noise ``R`` cannot represent — the filter reads the drift as velocity. The
+point is observed along its viewing ray scaled by ``1 + b``::
+
+    z = (1 + b)·(p − V·lag) + w       H = [(1+b)·I, −lag·(1+b)·I, p − V·lag]   (EKF)
+
+with ``b`` a first-order Gauss-Markov process (``σ_b`` stationary, correlation time
+``τ``): ``b ← e^{−Δt/τ}·b``, ``P_bb += σ_b²·(1 − e^{−2Δt/τ})``. Under known ego
+translation the range rate of a static point fixes ``b``; ``σ_b = 0`` makes the
+5-state filter reproduce the 4-state one.
 """
 
 from __future__ import annotations
@@ -70,6 +82,16 @@ def cwna_process_noise(dt_s: float, q: float) -> NDArray[np.float64]:
 
 
 @dataclass(frozen=True)
+class RangeBias:
+    """Gauss-Markov range-scale bias of the measurements (module docstring)."""
+
+    sigma: float
+    """Stationary σ of ``b`` (fraction of range, e.g. 0.05 = 5 %)."""
+    tau_s: float
+    """Correlation time of ``b`` (s)."""
+
+
+@dataclass(frozen=True)
 class EgoDelta:
     """Camera motion between two capture timestamps, in the ground plane."""
 
@@ -106,22 +128,34 @@ def predict_batch(
     dt_s: NDArray[np.float64],
     q: NDArray[np.float64],
     ego: EgoDelta | None = None,
+    bias_sigma: float = 0.0,
+    bias_tau_s: float = 1.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Predict ``N`` filters ``x (N, 4)``, ``P (N, 4, 4)`` by their own ``Δt`` under one ego delta."""
+    """Predict ``N`` filters ``x (N, n)``, ``P (N, n, n)`` by their own ``Δt`` under one ego delta.
+
+    ``n = 5`` appends the range-scale bias ``b`` (module docstring), which decays with
+    ``bias_tau_s`` towards 0 and gains ``bias_sigma²·(1 − e^{−2Δt/τ})`` of variance."""
     d = np.asarray(dt_s, dtype=np.float64)
     if np.any(d < 0.0):
         raise ValueError(f"predict backwards in time (min Δt {d.min() * 1e3:.2f} ms)")
-    f = np.broadcast_to(np.eye(4), (d.size, 4, 4)).copy()
+    n = x.shape[1]
+    f = np.broadcast_to(np.eye(n), (d.size, n, n)).copy()
     f[:, 0, 2] = f[:, 1, 3] = d
+    if n == 5:
+        f[:, 4, 4] = np.exp(-d / bias_tau_s)
     x_new = np.einsum("nij,nj->ni", f, x)
     if ego is not None and (ego.yaw_rad != 0.0 or ego.translation_xz != (0.0, 0.0)):
         rt = rotation_2d(ego.yaw_rad).T
-        blk = np.zeros((4, 4))
-        blk[:2, :2] = blk[2:, 2:] = rt
+        blk = np.eye(n)
+        blk[:2, :2] = blk[2:4, 2:4] = rt
         f = blk @ f
         x_new = x_new @ blk.T
         x_new[:, :2] -= rt @ np.asarray(ego.translation_xz, dtype=np.float64)
-    p_new = f @ p @ np.transpose(f, (0, 2, 1)) + cwna_process_noise_batch(d, q)
+    qn = np.zeros((d.size, n, n))
+    qn[:, :4, :4] = cwna_process_noise_batch(d, q)
+    if n == 5:
+        qn[:, 4, 4] = bias_sigma**2 * (1.0 - np.exp(-2.0 * d / bias_tau_s))
+    p_new = f @ p @ np.transpose(f, (0, 2, 1)) + qn
     if ego is not None and ego.sigma_translation_m > 0.0:
         p_new[:, 0, 0] += ego.sigma_translation_m**2
         p_new[:, 1, 1] += ego.sigma_translation_m**2
@@ -153,15 +187,26 @@ def update_batch(
 
     With ``robust_chi2``, rows with ``NIS > robust_chi2`` are down-weighted by inflating
     ``R`` by ``NIS / robust_chi2`` (one Huber-like IRLS step): a heavy-tailed depth jump
-    moves the state by a bounded amount instead of either fully or not at all."""
-    n = x.shape[0]
+    moves the state by a bounded amount instead of either fully or not at all.
+
+    With a 5-state ``x`` the measurement is ``(1 + b)·(p − V·lag)`` (EKF linearisation,
+    module docstring)."""
+    n, dim = x.shape
     lag = np.zeros(n) if lag_s is None else np.asarray(lag_s, dtype=np.float64)
-    h = np.zeros((n, 2, 4))
+    h = np.zeros((n, 2, dim))
     h[:, 0, 0] = h[:, 1, 1] = 1.0
     h[:, 0, 2] = h[:, 1, 3] = -lag
     rr = np.asarray(r, dtype=np.float64) + (np.asarray(q) * lag**3 / 3.0)[:, None, None] * _EYE2
+    if dim == 5:
+        p_cap = x[:, :2] - lag[:, None] * x[:, 2:4]
+        scale = 1.0 + x[:, 4]
+        h[:, :, :4] *= scale[:, None, None]
+        h[:, :, 4] = p_cap
+        z_hat = scale[:, None] * p_cap
+    else:
+        z_hat = np.einsum("nij,nj->ni", h, x)
     ht = np.transpose(h, (0, 2, 1))
-    nu = np.asarray(z, dtype=np.float64) - np.einsum("nij,nj->ni", h, x)
+    nu = np.asarray(z, dtype=np.float64) - z_hat
     ph = p @ ht
     s_inv = _inv2(np.asarray(h @ ph + rr, dtype=np.float64))
     nis = np.einsum("ni,nij,nj->n", nu, s_inv, nu)
@@ -173,7 +218,7 @@ def update_batch(
             s_inv = _inv2(np.asarray(h @ ph + rr, dtype=np.float64))
     k = ph @ s_inv
     x_new = x + np.einsum("nij,nj->ni", k, nu)
-    ikh = np.eye(4) - k @ h
+    ikh = np.eye(dim) - k @ h
     p_new = ikh @ p @ np.transpose(ikh, (0, 2, 1)) + k @ rr @ np.transpose(k, (0, 2, 1))
     p_new = 0.5 * (p_new + np.transpose(p_new, (0, 2, 1)))
     x_out = np.where(ok[:, None], x_new, x)
@@ -184,7 +229,7 @@ def update_batch(
 class CvKalman:
     """One track's CV filter; see the module docstring for the frame conventions."""
 
-    __slots__ = ("P", "q", "t_ns", "x")
+    __slots__ = ("P", "q", "range_bias", "t_ns", "x")
 
     def __init__(
         self,
@@ -194,16 +239,21 @@ class CvKalman:
         q: float,
         sigma_v0_mps: float,
         v0_xz: NDArray[np.float64] | None = None,
+        range_bias: RangeBias | None = None,
     ) -> None:
-        self.x = np.zeros(4)
+        dim = 4 if range_bias is None else 5
+        self.x = np.zeros(dim)
         self.x[:2] = z_xz
         if v0_xz is not None:
-            self.x[2:] = v0_xz
-        self.P = np.zeros((4, 4))
+            self.x[2:4] = v0_xz
+        self.P = np.zeros((dim, dim))
         self.P[:2, :2] = r_xz
         self.P[2, 2] = self.P[3, 3] = sigma_v0_mps**2
+        if range_bias is not None:
+            self.P[4, 4] = range_bias.sigma**2
         self.q = float(q)
         self.t_ns = int(t_ns)
+        self.range_bias = range_bias
 
     @property
     def position(self) -> NDArray[np.float64]:
@@ -212,17 +262,31 @@ class CvKalman:
     @property
     def velocity(self) -> NDArray[np.float64]:
         """Over-ground velocity (relative when the ego provider is not absolute)."""
-        return self.x[2:]
+        return self.x[2:4]
+
+    @property
+    def bias(self) -> float:
+        """Range-scale bias ``b`` (``nan`` for the 4-state filter)."""
+        return float(self.x[4]) if self.x.size == 5 else float("nan")
 
     def relative_velocity(self, ego: EgoDelta) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """``V − v_ego`` and its covariance (ego velocity noise added isotropically)."""
-        v = self.x[2:] - np.asarray(ego.velocity_xz, dtype=np.float64)
-        cov = self.P[2:, 2:] + ego.sigma_velocity_mps**2 * _EYE2
+        v = self.x[2:4] - np.asarray(ego.velocity_xz, dtype=np.float64)
+        cov = self.P[2:4, 2:4] + ego.sigma_velocity_mps**2 * _EYE2
         return v, cov
 
     def predict(self, t_ns: int, ego: EgoDelta | None = None) -> None:
         dt = np.array([(int(t_ns) - self.t_ns) * 1e-9])
-        x, p = predict_batch(self.x[None], self.P[None], dt, np.array([self.q]), ego)
+        rb = self.range_bias
+        x, p = predict_batch(
+            self.x[None],
+            self.P[None],
+            dt,
+            np.array([self.q]),
+            ego,
+            0.0 if rb is None else rb.sigma,
+            1.0 if rb is None else rb.tau_s,
+        )
         self.x, self.P = x[0], p[0]
         self.t_ns = int(t_ns)
 

@@ -26,6 +26,7 @@ filter:
   robust_chi2: 5.99         # NIS > 5.99 → R·NIS/5.99 (Huber/IRLS): acota el efecto de saltos de profundidad; null = off
   max_rejects: 3            # rechazos consecutivos → reinicialización desde la medida
   r_scale: 1.0              # R ← r_scale·R de F4 (consistencia: NIS medio ≈ 2 en diagnostics.consistency)
+  range_bias: null          # {sigma, tau_s}: sesgo de escala de rango Gauss-Markov por track (KF de 5 estados); null = off
   static_below_mps: 1.0     # etiqueta de movimiento con histéresis (sólo con ego-motion real)
   moving_above_mps: 2.0
   motion_hold_s: 0.3

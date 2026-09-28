@@ -53,6 +53,7 @@ from percepcion3d.tracking.ego_motion import (  # noqa: E402
     load_oxts_file,
     resample_oxts,
 )
+from percepcion3d.tracking.kalman_filter import RangeBias  # noqa: E402
 from percepcion3d.tracking.tracker3d import Tracker3D, load_tracker_config  # noqa: E402
 from percepcion3d.utils.profiling import StageTimer  # noqa: E402
 
@@ -74,6 +75,23 @@ def _print_consistency(c: dict[str, Any] | None) -> None:
                 f"σ pred {st['sigma_vz_pred_rms']:.2f} (ratio {st['ratio']:.2f}) · NIS mean "
                 f"{st['mean_nis']:.2f} (>5.99: {100 * st['frac_nis_gt_5.99']:.0f} %)"
             )
+
+
+def _print_range_error(r: dict[str, Any] | None) -> None:
+    if not r or r.get("n", 0) < 3:
+        return
+    ac = " ".join(f"{k}f={v['rho']:.2f}" for k, v in r.get("autocorr_by_lag_frames", {}).items())
+    print(
+        f"    range error: n={r['n']} mean {100 * r['mean_rel']:+.1f} % rms "
+        f"{100 * r['rms_rel']:.1f} % · frame share {r.get('frame_share', float('nan')):.2f} · "
+        f"autocorr {ac}"
+    )
+    be = r.get("bias_estimate")
+    if be:
+        print(
+            f"    bias estimate: corr with error {be['corr_with_error']:.2f} · "
+            f"rms(error − b) {100 * be['rms_error_minus_bias']:.1f} %"
+        )
 
 
 def _print_turn(turn: dict[str, Any] | None) -> None:
@@ -177,6 +195,15 @@ def main() -> int:
         help="OXTS clock ahead of the camera (ms): frame i uses the INS state at t_i + offset "
         "(ego-motion and GT rotation term alike)",
     )
+    ap.add_argument(
+        "--range-bias",
+        type=float,
+        nargs=2,
+        metavar=("SIGMA", "TAU_S"),
+        default=None,
+        help="Per-track Gauss-Markov range-scale bias state (σ as a fraction of range, "
+        "correlation time in s); 0 0 disables it",
+    )
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
     if args.engine is not None and args.depth_dir is not None:
@@ -200,6 +227,9 @@ def main() -> int:
         trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
     if args.r_scale is not None:
         trk_cfg = replace(trk_cfg, r_scale=args.r_scale)
+    if args.range_bias is not None:
+        sb, tau = args.range_bias
+        trk_cfg = replace(trk_cfg, range_bias=RangeBias(sb, tau) if sb > 0.0 else None)
     if args.q_vehicle is not None:
         veh = replace(trk_cfg.dynamics_for("car"), q=args.q_vehicle)
         trk_cfg = replace(trk_cfg, dynamics={**trk_cfg.dynamics, "vehicle": veh})
@@ -289,6 +319,7 @@ def main() -> int:
                 )
         _print_turn(d["diagnostics"].get("turn"))
         _print_consistency(d["diagnostics"].get("consistency"))
+        _print_range_error(d["diagnostics"].get("range_error"))
         ok &= d["rmse_vel_rel_mps"] <= 1.0
         if args.ego == "oxts":
             ok &= d["static_frac"] >= 0.9
@@ -304,6 +335,7 @@ def main() -> int:
                 )
         _print_turn(pooled.get("turn"))
         _print_consistency(pooled.get("consistency"))
+        _print_range_error(pooled.get("range_error"))
 
     depth_mode = (
         "engine" if args.engine else ("npy" if args.depth_dir else "none (geometry+height)")
@@ -321,6 +353,9 @@ def main() -> int:
             "robust_chi2": trk_cfg.robust_chi2,
             "q_vehicle": trk_cfg.dynamics_for("car").q,
             "r_scale": trk_cfg.r_scale,
+            "range_bias": None
+            if trk_cfg.range_bias is None
+            else {"sigma": trk_cfg.range_bias.sigma, "tau_s": trk_cfg.range_bias.tau_s},
             "arbitration": fusion_cfg.arbitration,
             "sigma_pitch_deg": float(np.rad2deg(fusion_cfg.sigma_pitch_rad)),
             "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),

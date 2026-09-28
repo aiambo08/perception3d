@@ -17,6 +17,7 @@ from percepcion3d.eval.tracking_kitti import (
     TrackingKittiResult,
     gt_kinematics,
     merge_results,
+    range_error_structure,
     run_tracking_kitti,
 )
 from percepcion3d.eval.tracking_synthetic import (
@@ -37,6 +38,7 @@ from percepcion3d.tracking.ego_motion import (
 )
 from percepcion3d.tracking.kalman_filter import (
     CvKalman,
+    RangeBias,
     cv_transition,
     cwna_process_noise,
     predict_batch,
@@ -586,3 +588,94 @@ def test_update_batch_robust_bounds_outlier_pull() -> None:
     assert ok[0] and nis_r[0] == pytest.approx(nis[0]) and nis[0] > 5.99
     assert 0.0 < x_out_r[0, 1] - 20.0 < x_out[0, 1] - 20.0
     assert np.all(np.linalg.eigvalsh(p_out_r[0]) > 0)
+
+
+# ----------------------------------------------------------------------------
+# Range-scale bias state (5-state KF)
+# ----------------------------------------------------------------------------
+
+
+def test_range_bias_state_with_zero_sigma_reproduces_4_state_filter() -> None:
+    ego = ConstantEgoMotion(v_forward_mps=10.0, yaw_rate_rps=0.2).delta(0, 100 * MS)
+    rng = np.random.default_rng(3)
+    a = CvKalman(np.array([2.0, 20.0]), 0.2 * np.eye(2), 0, q=1.0, sigma_v0_mps=5.0)
+    b = CvKalman(
+        np.array([2.0, 20.0]),
+        0.2 * np.eye(2),
+        0,
+        q=1.0,
+        sigma_v0_mps=5.0,
+        range_bias=RangeBias(0.0, 2.0),
+    )
+    t = 0
+    for _ in range(10):
+        t += 100 * MS
+        a.predict(t, ego)
+        b.predict(t, ego)
+        z = a.position + rng.normal(0.0, 0.3, 2)
+        a.update(z, 0.2 * np.eye(2), lag_s=0.03)
+        b.update(z, 0.2 * np.eye(2), lag_s=0.03)
+    assert b.x[:4] == pytest.approx(a.x) and b.P[:4, :4] == pytest.approx(a.P)
+    assert b.bias == 0.0 and math.isnan(a.bias)
+
+
+def test_constant_range_bias_is_unobservable_from_a_single_constant_velocity_track() -> None:
+    """``z = (1+b)·(p₀ + (V − v_ego)·t)``: one track at constant velocity only fixes the
+    product ``(1+b)(V − v_ego)``, so a constant 6 % scale error is read as a phantom
+    velocity and ``b`` stays at its prior. The bias state helps only through its
+    Gauss-Markov dynamics (its variations decorrelate unlike a CV trajectory)."""
+    v_ego, dt = 10.0, 0.1
+    ego = ConstantEgoMotion(v_forward_mps=v_ego).delta(0, int(dt * 1e9))
+    r = np.diag([0.25, 1.0])
+    kf = CvKalman(np.array([1.0, 1.06 * 50.0]), r, 0, 1.0, 15.0, range_bias=RangeBias(0.1, 30.0))
+    p = np.array([1.0, 50.0])
+    for k in range(1, 41):
+        p = p - np.array([0.0, v_ego * dt])
+        kf.predict(int(k * dt * 1e9), ego)
+        kf.update(1.06 * p, r)
+    assert abs(kf.bias) < 0.01
+    assert kf.velocity[1] == pytest.approx(-0.6, abs=0.05)
+    assert math.sqrt(kf.P[4, 4]) > 0.04
+
+
+def test_tracker_range_bias_improves_consistency_under_correlated_range_error() -> None:
+    geo = PinholeGeometry(INTR, EXTR)
+    sc = TrackingScenario(
+        "bias", duration_s=6.0, rel_sigma_z=0.02, range_bias_sigma=0.05, range_bias_tau_s=2.0
+    )
+    base = run_tracking_scenario(geo, sc, seed=1)
+    aug = run_tracking_scenario(
+        geo, sc, cfg=Tracker3DConfig(range_bias=RangeBias(0.05, 2.0)), seed=1
+    )
+    assert np.mean(aug.nees) < 0.5 * np.mean(base.nees)
+    assert aug.rmse_vz < base.rmse_vz
+
+
+def test_range_bias_loads_from_yaml_and_repo_default_is_off(tmp_path: Path) -> None:
+    for name in ("tracking.yaml", "tracking_kitti.yaml"):
+        assert load_tracker_config(ROOT / "configs" / name).range_bias is None
+    y = tmp_path / "t.yaml"
+    y.write_text("filter:\n  range_bias: {sigma: 0.05, tau_s: 3.0}\n", encoding="utf-8")
+    assert load_tracker_config(y).range_bias == RangeBias(0.05, 3.0)
+
+
+def test_range_error_structure_separates_frame_shared_and_per_track_error() -> None:
+    rng = np.random.default_rng(0)
+    frames = np.arange(200)
+    shared = [
+        (float(f), float(t), float(0.05 * np.sin(f / 7.0) + rng.normal(0, 0.002)), math.nan)
+        for f in frames
+        for t in range(4)
+    ]
+    indep = [(f, t, rng.normal(0, 0.05), np.nan) for f in frames for t in range(4)]
+    s = range_error_structure(np.asarray(shared, dtype=np.float64))
+    i = range_error_structure(np.asarray(indep, dtype=np.float64))
+    assert s["frame_share"] > 0.9 and abs(i["frame_share"]) < 0.1
+    assert s["autocorr_by_lag_frames"]["1"]["rho"] > 0.9
+    assert abs(i["autocorr_by_lag_frames"]["1"]["rho"]) < 0.1
+    est = [(f, t, e, e) for f, t, e, _ in shared]
+    assert range_error_structure(np.asarray(est))["bias_estimate"]["corr_with_error"] > 0.99
+    a = TrackingKittiResult(range_diag=shared[:8])
+    m = merge_results([a, a])
+    assert len(m.range_diag) == 16 and len({(r[0], r[1]) for r in m.range_diag}) == 16
+    assert m.diagnostics()["range_error"]["n"] == 16
