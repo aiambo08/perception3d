@@ -63,6 +63,19 @@ def _p95(p50_p95_p99: list[float]) -> float:
     return p50_p95_p99[1] if p50_p95_p99 else float("nan")
 
 
+def _print_consistency(c: dict[str, Any] | None) -> None:
+    if not c:
+        return
+    rows = {"all": c["all"], **{f"age {k} s": v for k, v in c["by_track_age_s"].items()}}
+    for name, st in rows.items():
+        if st["n"]:
+            print(
+                f"    consistency {name:>11}: n={st['n']:5d} RMSE V_Z {st['rmse_vz']:.2f} · "
+                f"σ pred {st['sigma_vz_pred_rms']:.2f} (ratio {st['ratio']:.2f}) · NIS mean "
+                f"{st['mean_nis']:.2f} (>5.99: {100 * st['frac_nis_gt_5.99']:.0f} %)"
+            )
+
+
 def _print_turn(turn: dict[str, Any] | None) -> None:
     if not turn:
         return
@@ -114,6 +127,12 @@ def main() -> int:
         choices=("select", "inflate"),
         default=None,
         help="Override gates.arbitration of --fusion",
+    )
+    ap.add_argument(
+        "--r-scale",
+        type=float,
+        default=None,
+        help="Override filter.r_scale of --tracking (R ← r_scale·R of F4)",
     )
     ap.add_argument(
         "--robust-chi2",
@@ -179,6 +198,8 @@ def main() -> int:
     trk_cfg = load_tracker_config(args.tracking)
     if args.robust_chi2 is not None:
         trk_cfg = replace(trk_cfg, robust_chi2=args.robust_chi2 if args.robust_chi2 > 0 else None)
+    if args.r_scale is not None:
+        trk_cfg = replace(trk_cfg, r_scale=args.r_scale)
     if args.q_vehicle is not None:
         veh = replace(trk_cfg.dynamics_for("car"), q=args.q_vehicle)
         trk_cfg = replace(trk_cfg, dynamics={**trk_cfg.dynamics, "vehicle": veh})
@@ -267,6 +288,7 @@ def main() -> int:
                     f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
                 )
         _print_turn(d["diagnostics"].get("turn"))
+        _print_consistency(d["diagnostics"].get("consistency"))
         ok &= d["rmse_vel_rel_mps"] <= 1.0
         if args.ego == "oxts":
             ok &= d["static_frac"] >= 0.9
@@ -281,6 +303,7 @@ def main() -> int:
                     f"bias ({st['bias_xz'][0]:+.2f}, {st['bias_xz'][1]:+.2f})"
                 )
         _print_turn(pooled.get("turn"))
+        _print_consistency(pooled.get("consistency"))
 
     depth_mode = (
         "engine" if args.engine else ("npy" if args.depth_dir else "none (geometry+height)")
@@ -297,6 +320,7 @@ def main() -> int:
             "boxes": args.boxes,
             "robust_chi2": trk_cfg.robust_chi2,
             "q_vehicle": trk_cfg.dynamics_for("car").q,
+            "r_scale": trk_cfg.r_scale,
             "arbitration": fusion_cfg.arbitration,
             "sigma_pitch_deg": float(np.rad2deg(fusion_cfg.sigma_pitch_rad)),
             "pitch_q_deg_per_sqrt_s": float(np.rad2deg(pit_cfg.q_rad_per_sqrt_s)),

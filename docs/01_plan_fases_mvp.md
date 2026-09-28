@@ -554,6 +554,33 @@ for ARM in 0 2.16; do
 done
 ```
 
+**Resultado del barrido (21 secuencias).** Pendiente frente a `ω·X` entre −0.09 y −0.13
+en todas las variantes: el término de rotación está y con el signo correcto. Desfase
+±100 ms y brazo 0–2.16 m mueven el sesgo en curva < 0.05 m/s: descartados como causa.
+En giro a la izquierda (483 de 13930 muestras) el sesgo de V_Z es +0.96 m/s, de los que
++0.45 son deriva del rango de F4; se concentra en pocas secuencias (0007: +4.7 m/s con 26
+muestras). El DoD no lo impide el sesgo sino la convergencia: RMSE 1.83 m/s en tracks de
+1–2 s frente a 0.90 m/s con más de 4 s.
+
+**Consistencia del filtro.** Con un prior de velocidad amplio (σ_v0 = 15 m/s) el KF ya
+equivale, tras dos actualizaciones, a la diferencia finita de las primeras medidas, así
+que inicializar V por diferencias no cambiaría nada. Lo que decide la convergencia es si
+`R` (de F4) y `q` son realistas. `diagnostics.consistency` da, por edad del track, el NIS
+medio (≈ 2 si `R`/`q` son correctos; 5 % por encima de 5.99) y `ratio` = RMSE V_Z real /
+σ V_Z predicha (> 1 ⇒ el filtro se fía demasiado de las medidas). `filter.r_scale` /
+`--r-scale` escala `R`; junto con `--q-vehicle` permite barrerlos:
+
+```bash
+for R in 1 2 4; do
+  uv run python scripts/eval_tracking_kitti.py --root $KT --seqs $SEQS --ego oxts \
+      --engine models/depth_924x280_fp16.engine --r-scale $R --json reports/f5_conv_r$R.json
+done
+for Q in 0.25 4; do
+  uv run python scripts/eval_tracking_kitti.py --root $KT --seqs $SEQS --ego oxts \
+      --engine models/depth_924x280_fp16.engine --q-vehicle $Q --json reports/f5_conv_q$Q.json
+done
+```
+
 ---
 
 ## F6 · Cinemática y seguridad — ✔ implementado (CPU)

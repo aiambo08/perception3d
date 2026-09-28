@@ -104,6 +104,8 @@ class Tracker3DConfig:
     """Above this NIS the measurement is down-weighted (``R·NIS/robust_chi2``); ``None``
     disables it (plain gated KF)."""
     max_rejects: int = 3
+    r_scale: float = 1.0
+    """Multiplier of every measurement covariance from F4 (``R ← r_scale·R``)."""
     static_below_mps: float = 1.0
     moving_above_mps: float = 2.0
     static_chi2: float = 5.99
@@ -185,7 +187,7 @@ class Tracker3D:
 
     def _init(self, m: PositionMeasurement, cls: str, t_ns: int) -> _Track3DState:
         d = self.cfg.dynamics_for(cls)
-        kf = CvKalman(m.xz, m.cov, m.t_ns, d.q, d.sigma_v0_mps)
+        kf = CvKalman(m.xz, self.cfg.r_scale * m.cov, m.t_ns, d.q, d.sigma_v0_mps)
         if m.t_ns < t_ns:
             kf.predict(t_ns, None)
         return _Track3DState(kf, t_ns, t_ns)
@@ -257,7 +259,7 @@ class Tracker3D:
                 np.stack([k.x for k in kfs]),
                 np.stack([k.P for k in kfs]),
                 np.stack([m.xz for _, m in upd]),
-                np.stack([m.cov for _, m in upd]),
+                self.cfg.r_scale * np.stack([m.cov for _, m in upd]),
                 np.array([k.q for k in kfs]),
                 np.array([max(0.0, (t_ns - m.t_ns) * 1e-9) for _, m in upd]),
                 self.cfg.gate_chi2,

@@ -191,6 +191,9 @@ class TrackingKittiResult:
     turn_diag: list[tuple[float, ...]] = field(default_factory=list)
     """``(signed yaw rate, X, ex, ez, frame, gt_track_id)`` per ``diag`` sample (position
     error = tracker − GT, m)."""
+    filter_diag: list[tuple[float, float, float]] = field(default_factory=list)
+    """``(NIS of the last update, predicted σ of relative V_Z, n_updates)`` per ``diag``
+    sample."""
     id_switches: int = 0
     n_gt_ids: int = 0
     n_matches: int = 0
@@ -241,6 +244,39 @@ class TrackingKittiResult:
             and np.any(np.isfinite(np.asarray(self.turn_diag, dtype=np.float64)[:, 0]))
         ):
             out["turn"] = self._turn_diagnostics(d)
+        if self.filter_diag and len(self.filter_diag) == d.shape[0]:
+            out["consistency"] = self._consistency(d)
+        return out
+
+    def _consistency(self, d: NDArray[np.float64]) -> dict[str, Any]:
+        """Filter self-consistency by track age: with a correct ``R``/``q`` the NIS has
+        mean 2 (χ² 2 dof, 5 % above 5.99) and the predicted ``σ_VZ`` matches the actual
+        ``V_Z`` RMSE (``ratio`` ≈ 1; > 1 ⇒ over-confident filter)."""
+        f = np.asarray(self.filter_diag, dtype=np.float64).reshape(-1, 3)
+        evz, age, nis, sig = d[:, 1], d[:, 9], f[:, 0], f[:, 1]
+
+        def block(m: NDArray[np.bool_]) -> dict[str, Any]:
+            if not m.any():
+                return {"n": 0}
+            nm = m & np.isfinite(nis)
+            rmse = float(np.sqrt(np.mean(evz[m] ** 2)))
+            s = float(np.sqrt(np.mean(sig[m] ** 2)))
+            return {
+                "n": int(m.sum()),
+                "rmse_vz": rmse,
+                "sigma_vz_pred_rms": s,
+                "ratio": rmse / s if s > 0.0 else float("nan"),
+                "n_nis": int(nm.sum()),
+                "mean_nis": float(nis[nm].mean()) if nm.any() else float("nan"),
+                "frac_nis_gt_5.99": float(np.mean(nis[nm] > 5.99)) if nm.any() else float("nan"),
+                "mean_n_updates": float(f[m, 2].mean()),
+            }
+
+        out: dict[str, Any] = {"all": block(np.ones(age.shape[0], dtype=bool))}
+        out["by_track_age_s"] = {
+            f"{lo:g}_{hi:g}": block((age >= lo) & (age < hi))
+            for lo, hi in zip(DIAG_AGE_BINS_S[:-1], DIAG_AGE_BINS_S[1:], strict=True)
+        }
         return out
 
     def _turn_diagnostics(self, d: NDArray[np.float64]) -> dict[str, Any]:
@@ -340,8 +376,11 @@ def merge_results(results: Sequence[TrackingKittiResult]) -> TrackingKittiResult
             out.turn_diag.extend((*t[:5], t[5] + offset) for t in r.turn_diag)
             offset += max((t[5] for t in r.turn_diag), default=0.0) + 1.0
         out.vel_err.extend(r.vel_err)
+        out.filter_diag.extend(r.filter_diag if len(r.filter_diag) == len(r.diag) else [])
     if len(out.turn_diag) != len(out.diag):
         out.turn_diag = []
+    if len(out.filter_diag) != len(out.diag):
+        out.filter_diag = []
     return out
 
 
@@ -438,6 +477,9 @@ def run_tracking_kitti(
                     float(fs.frame_id),
                     float(lab.track_id),
                 )
+            )
+            res.filter_diag.append(
+                (tr.last_nis, float(np.sqrt(tr.cov_vel_rel[1, 1])), float(tr.n_updates))
             )
             if bin_m[0] <= k.z_m <= bin_m[1]:
                 res.vel_err.append((float(dv[0]), float(dv[1])))
