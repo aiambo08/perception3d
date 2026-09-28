@@ -1,62 +1,172 @@
+<div align="center">
+
 # percepcion3d
 
-Pipeline de percepción espacial 3D monocular en tiempo real (edge, GPU Ada 8 GB,
-Linux/WSL2). Transforma píxeles en coordenadas métricas $X, Y, Z$, velocidad
-relativa y alertas de colisión (TTC/CPA) con un diseño asíncrono *dual-rate*.
+**Percepción 3D monocular en tiempo real para robótica móvil y vehículos autónomos**
 
-## Documentación
+De una sola cámara RGB a posiciones métricas $(X, Y, Z)$, velocidad relativa, tracking 3D y
+alertas de colisión TTC/CPA deterministas, con un lazo *dual-rate* medido en GPU edge.
 
-- [`docs/00_analisis_critico.md`](docs/00_analisis_critico.md) — riesgos,
-  trade-offs y mitigaciones por etapa; hallazgos sobre el código actual.
-- [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md) — fases F0–F8,
-  Definition of Done y estrategia de medición (P50/P95/P99, VRAM).
+![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)
+![TensorRT](https://img.shields.io/badge/TensorRT-10.x-76B900?logo=nvidia&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900?logo=nvidia&logoColor=white)
+![uv](https://img.shields.io/badge/deps-uv-DE5FE9)
+![Ruff](https://img.shields.io/badge/lint-ruff-D7FF64?logo=ruff&logoColor=black)
+![mypy](https://img.shields.io/badge/types-mypy%20strict-2A6DB2)
+![CI](https://github.com/aiambo08/perception3d/actions/workflows/ci.yml/badge.svg)
 
-## Estado
+<img src="docs/assets/demo.gif" alt="Demo: detector, profundidad relativa, tracking 3D y alertas TTC" width="900">
 
-Fase 0 + F0.1 (geometría con roll, intersección con el suelo vectorizada y
-modelo de varianza, calibración, rectificación) y F1 (medición P50/P95/P99 y
-VRAM, `LatestFrameSlot`, fuentes KITTI/vídeo/V4L2, escena sintética, GT y
-métricas KITTI) y F2 (detector 2D: letterbox rectangular con inversa exacta,
-cirugía ONNX con preprocesado uint8 + `EfficientNMS_TRT`, `TrtEngine`
-asíncrono y `Detector` con backend inyectable, recall COCO→KITTI) y F3
-(profundidad relativa: Depth Anything V2-Small → ONNX con normalización
-ImageNet en grafo, `DepthEstimator.infer_async` → `DepthMap` fp16 con
-metadatos de frame, lazo de contención detector+depth en dos streams, sanidad
-Spearman disparidad vs 1/Z LiDAR) y F4 (fusión métrica CPU/NumPy: ajuste
-afín robusto $(s,t)$ disparidad↔$1/Z_c$ sobre la calzada con Kalman y gating
-$\chi^2$, mediana/MAD con bimodalidad por caja, BLUE en profundidad inversa de
-suelo + red + altura con error de pitch correlado, pitch en línea desde
-alturas de clase, `Measurement3D` con flags y timestamps) y F5 (tracking: ByteTrack 2D, KF CV
-en $[X, Z, V_X, V_Z]$ con $\Delta t$ variable, $R_k$ desde F4 y mediciones
-retrasadas, ego-motion `Zero`/`Constant`/`Oxts`, velocidad relativa y
-etiqueta estático/móvil) y F6 (seguridad: $t_{CPA}$/$d_{CPA}$ con σ,
-$TTC_{low}$ conservador, compuertas de proximidad/trayectoria y máquina de
-alertas pura con histéresis, dwell y decaimiento) y F7 (integración: lazo
-dual-rate mono-hilo detector/profundidad con `frame_id` sellado, cadencia de
-profundidad adaptativa, buffer de cajas por frame para mapas antiguos,
-envoltorio `cuda-python` con streams por prioridad, telemetría asíncrona con
-cola acotada y Rerun perezoso, runner KITTI/vídeo con informe de DoD)
-implementadas y testeadas en CPU/ONNX Runtime. Las métricas GPU de F2 y F3 (P95/P99, VRAM,
-recall, Spearman) y el DoD KITTI de F4 (AbsRel por bins) están pendientes de
-medirse en la GPU objetivo; los DoD sintéticos y de coste CPU de F4 se cumplen
-en local (`scripts/eval_fusion_synthetic.py`), igual que los sintéticos de F5
-(`scripts/eval_tracking_synthetic.py`) y F6 (`scripts/eval_safety_synthetic.py`).
-F5 en KITTI cumple estáticos, ID switches y coste CPU, pero no el RMSE de
-velocidad en tráfico urbano (0000/0001: 1.2–1.5 m/s frente a 1.0) por un
-sesgo del pitch del cue de suelo de F4 — limitación documentada en
-`docs/01_plan_fases_mvp.md`. El DoD de F7 se midió en la GPU objetivo
-(RTX Ada 8 GB bajo WSL2, KITTI 0001 en bucle, 60 s): P99 captura→alerta
-9.00 ms (P50 5.93), profundidad 29.9 Hz con antigüedad P95 33 ms, 0.39 % de
-descartes, 539 MB de VRAM sobre la base y `log()` P95 0.30 ms; todos los
-criterios cumplen (detalle en el plan). F8 (endurecimiento) añade la
-calibración INT8 del detector con frames KITTI y su veredicto FP16 frente a
-INT8, el histórico de benchmarks con detección de regresiones, los tests
-`gpu` de humo, la imagen `nvidia/cuda` para regenerar engines y la guía de
-arranque en WSL2 de abajo. INT8 se midió y se rechazó: baja el P95 de
-`det.gpu` un 38 %, pero pierde 7.3 pt de recall de peatones (IC95
-[−8.7, −5.9]) sobre 6743 peatones, así que el detector se queda en FP16.
+<sub>Demo generada con <code>scripts/make_readme_assets.py</code>: escena sintética (cajas ruidosas y mapa de
+1/Z afín, como el de Depth Anything) procesada por el código real de fusión F4, tracking F5 y alertas F6.
+Ego a 12 m/s, coche delante acercándose, adelantamiento, coche de frente y peatón cruzando.</sub>
 
-## Arranque en WSL2
+</div>
+
+---
+
+## Contenido
+
+- [Qué hace](#qué-hace)
+- [Arquitectura del pipeline](#arquitectura-del-pipeline)
+- [Resultados medidos](#resultados-medidos)
+- [Inicio rápido](#inicio-rápido)
+- [Reproducir cada fase](#reproducir-cada-fase)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Desarrollo](#desarrollo)
+- [Documentación](#documentación)
+
+## Qué hace
+
+| Etapa | Módulo | Qué aporta |
+|---|---|---|
+| **Captura** | `io/sources.py` | KITTI (tracking y raw, con OXTS), vídeo, V4L2 y reproductor con jitter; `LatestFrameSlot` *latest-wins* |
+| **Detector 2D** | `detection/` | YOLO → ONNX con preprocesado uint8 y `EfficientNMS_TRT` en el grafo; TensorRT FP16 con CUDA Graph y letterbox con inversa exacta |
+| **Profundidad relativa** | `depth/depth_trt.py` | Depth Anything V2-S en TensorRT FP16, normalización ImageNet dentro del grafo, cadencia adaptativa |
+| **Fusión métrica** | `depth/ground_solver.py`, `depth/fusion.py` | Ajuste afín robusto $(s,t)$ sobre la calzada con Kalman y gating $\chi^2$, pitch en línea, BLUE de suelo + red + altura con varianza |
+| **Tracking 3D** | `tracking/` | ByteTrack 2D + Kalman CV en $[X, Z, V_X, V_Z]$ con $\Delta t$ variable, ego-motion OXTS y estado opcional de sesgo de rango |
+| **Seguridad** | `safety/` | $t_{CPA}$/$d_{CPA}$ y $TTC_{low}$ con σ, compuertas de trayectoria y máquina de alertas pura con histéresis |
+| **Integración** | `runtime/pipeline.py` | Lazo mono-hilo dual-rate, `frame_id` sellado, streams CUDA por prioridad, buffer de cajas para mapas atrasados |
+| **Telemetría** | `telemetry/rerun_sink.py` | Cola acotada no bloqueante, Rerun perezoso, JSONL, P50/P95/P99 y VRAM por etapa |
+
+<p align="center">
+  <img src="docs/assets/demo_frame.png" alt="Frame de la demo con alerta CRITICAL" width="900">
+</p>
+
+## Arquitectura del pipeline
+
+```mermaid
+flowchart LR
+    subgraph IN["Entrada"]
+        CAM["Cámara / vídeo / KITTI<br/><i>FrameSource</i>"]
+        OX["OXTS / odometría<br/><i>EgoMotionProvider</i>"]
+        CAL["Calibración<br/>intrínsecas · altura · pitch"]
+    end
+
+    subgraph GPU["GPU · TensorRT FP16"]
+        DET["Detector 2D<br/>YOLO + EfficientNMS<br/><b>cada frame · 60 Hz</b>"]
+        DEP["Profundidad relativa<br/>Depth Anything V2-S<br/><b>adaptativa · ~30 Hz</b>"]
+    end
+
+    subgraph CPU["CPU · NumPy"]
+        GS["Solver de suelo<br/>afín (s,t) robusto + Kalman<br/>pitch en línea"]
+        FU["Fusión métrica BLUE<br/>Z suelo · Z red · Z altura<br/>→ Measurement3D ± σ"]
+        TR["Tracker 3D<br/>ByteTrack + KF CV<br/>ego-motion · sesgo de rango"]
+        SA["Seguridad F6<br/>CPA · TTC_low<br/>histéresis"]
+    end
+
+    subgraph OUT["Salida"]
+        AL["Alertas<br/>NONE → CRITICAL"]
+        TE["Telemetría asíncrona<br/>Rerun · JSONL · StageTimer"]
+    end
+
+    CAM -->|"frame_id, t_capture"| DET
+    CAM -->|"último frame libre"| DEP
+    CAL --> GS
+    DET -->|"cajas 2D"| FU
+    DEP -->|"mapa 1/Z afín<br/>(puede ir atrasado)"| GS
+    GS -->|"(s,t), pitch"| FU
+    FU -->|"X, Z, R_k"| TR
+    OX --> TR
+    TR -->|"posición, V_rel, Σ"| SA
+    SA --> AL
+    DET -.-> TE
+    FU -.-> TE
+    TR -.-> TE
+    SA -.-> TE
+```
+
+<details>
+<summary><b>Temporización del lazo dual-rate</b></summary>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Captura
+    participant D as Detector (stream alta prioridad)
+    participant P as Profundidad (stream baja prioridad)
+    participant F as Fusión + Tracker + F6
+    participant T as Telemetría (cola acotada)
+
+    C->>D: frame k (encolado primero)
+    C->>P: frame k si la GPU tiene hueco (DepthCadence)
+    D-->>F: cajas de k
+    Note over F: usa el mapa más reciente (k o k−1)<br/>con cajas de su frame (BoxHistory)<br/>e inflado de σ por antigüedad
+    F->>T: tracks + alertas (no bloquea, descarta si está llena)
+    P-->>F: mapa listo → disponible para k+1
+```
+
+</details>
+
+## Resultados medidos
+
+Todo medido en el hardware objetivo: **RTX Ada 8 GB bajo WSL2**, KITTI tracking/raw reproducido a 60 Hz.
+
+<p align="center">
+  <img src="docs/assets/latency_budget.svg" alt="Latencias medidas frente al presupuesto de 16.7 ms" width="760">
+</p>
+
+| Fase | Métrica | Resultado |
+|---|---|---|
+| F2 · Detector | `det.gpu` P50 / P95 (FP16) | 0.93 / 2.64 ms |
+| | Recall moderate peatones / coches | 79.9 % / 81.2 % |
+| F3 · Profundidad | Depth Anything V2-S 924×280 FP16 | ≈ 8 ms de GPU |
+| F4 · Fusión métrica | AbsRel 0–30 / 30–60 m (seq. 0001) | 6.5 % / 5.7 % |
+| F5 · Tracking | RMSE V tracks > 4 s / pool 0–30 m | 0.82 / ≈ 1.10 m/s |
+| F6 · Alertas | Batería sintética TTC/CPA | Determinista, DoD cumplido |
+| F7 · Lazo completo | Captura → alerta P50 / P99 | **5.93 / 9.00 ms** (presupuesto 16.7) |
+| | Profundidad · antigüedad P95 · descartes · VRAM | 29.9 Hz · 33 ms · 0.39 % · 539 MB |
+| F8 · INT8 detector | Δ recall peatones · Δ `det.gpu` P95 | −7.3 pt · −38 % → **rechazado, FP16** |
+
+> [!NOTE]
+> **Limitaciones conocidas.** El RMSE de velocidad global de F5 (≈ 1.10 m/s frente a 1.0) está limitado
+> por el error de rango de F4, correlado en el tiempo; el estado de sesgo de rango del Kalman
+> (`--range-bias`) está en evaluación. Todo lo medido es KITTI reproducido; falta validar con cámara real.
+> Detalle y decisiones en [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md).
+
+## Inicio rápido
+
+```bash
+git clone https://github.com/aiambo08/perception3d.git && cd perception3d
+uv venv --python 3.11 && source .venv/bin/activate
+uv pip install -e ".[dev]"                                   # núcleo CPU + herramientas
+
+pytest tests -q -m "not slow and not gpu"                    # batería CPU (sin GPU)
+python scripts/eval_fusion_synthetic.py                      # DoD sintético F4
+python scripts/eval_tracking_synthetic.py                    # DoD sintético F5
+python scripts/eval_safety_synthetic.py --seeds 10           # DoD sintético F6
+python scripts/make_readme_assets.py                         # regenera la demo de este README (ffmpeg)
+```
+
+Con GPU NVIDIA (TensorRT 10, CUDA 12):
+
+```bash
+uv pip install -e ".[runtime]"                               # tensorrt-cu12, cuda-python, rerun-sdk, nvidia-ml-py
+bash scripts/run_pipeline.sh kitti-tracking ~/datasets/kitti/tracking/training 0001 --ego oxts
+```
+
+<details>
+<summary><b>Arranque desde cero en WSL2 (Windows 11)</b></summary>
 
 Pasos para dejar la máquina lista desde cero (Windows 11 + WSL2 Ubuntu 22.04
 o 24.04). Los comandos se ejecutan dentro de WSL salvo que se indique
@@ -116,6 +226,13 @@ PowerShell.
    `TELEMETRY=none` o `RERUN_SAVE=reports/x.rrd`; para ver, abre el visor
    nativo en Windows (`pip install rerun-sdk` y `rerun` en PowerShell) y usa
    `RERUN_CONNECT=<ip-de-windows>:9876` desde WSL.
+
+</details>
+
+## Reproducir cada fase
+
+<details>
+<summary><b>Comandos por fase (F1–F8)</b></summary>
 
 ```bash
 uv run python scripts/profile_stage.py --stage rectify           # P50/P95/P99 de una etapa
@@ -241,6 +358,31 @@ entrada; los ficheros `data/outputs/bench/<AAAAMMDD_HHMMSS>_<nombre>.json`
 se versionan a propósito (son pequeños) para que el histórico viaje con el
 repo.
 
+</details>
+
+## Estructura del repositorio
+
+```text
+perception3d/
+├── configs/            # cámara, modelos, fusión, tracking (sintético / KITTI) y seguridad (YAML)
+├── docker/             # Dockerfile.trt: imagen nvidia/cuda pinada para regenerar engines
+├── docs/               # análisis crítico, plan por fases con DoD y assets del README
+├── scripts/            # export ONNX/TRT, benchmarks, evaluaciones KITTI/sintéticas, runner del lazo
+├── src/percepcion3d/
+│   ├── camera/         # intrínsecas, extrínsecas, geometría pinhole, rectificación
+│   ├── io/             # fuentes KITTI, vídeo, V4L2
+│   ├── detection/      # letterbox, cirugía ONNX, detector TensorRT, calibración INT8
+│   ├── depth/          # profundidad TensorRT, solver de suelo, muestreo y fusión métrica
+│   ├── tracking/       # ByteTrack, Kalman CV (+ sesgo de rango), ego-motion, Tracker3D
+│   ├── safety/         # cinemática CPA/TTC, compuertas y máquina de alertas
+│   ├── runtime/        # CUDA, TrtEngine, buffers, lazo dual-rate
+│   ├── telemetry/      # sinks asíncronos y Rerun
+│   ├── sim/            # escenas sintéticas deterministas
+│   ├── eval/           # métricas KITTI y sintéticas por fase
+│   └── utils/          # profiling P50/P95/P99, VRAM (NVML), histórico de benchmarks
+└── tests/              # pytest (markers slow y gpu)
+```
+
 ## Desarrollo
 
 ```bash
@@ -259,3 +401,10 @@ Grupos opcionales (`pyproject.toml`):
 | `runtime` | tensorrt-cu12 10.x, cuda-python, rerun-sdk, nvidia-ml-py | inferencia y VRAM en la GPU objetivo |
 | `export` | torch, torchvision, ultralytics, transformers, onnx | exportar ONNX (detector y depth) |
 | `dev` | pytest, ruff, mypy, onnx, onnxruntime | desarrollo y CI (tests de cirugía ONNX en CPU) |
+
+## Documentación
+
+| Documento | Contenido |
+|---|---|
+| [`docs/00_analisis_critico.md`](docs/00_analisis_critico.md) | Riesgos, trade-offs (latencia vs. precisión, memoria vs. robustez) y mitigaciones por etapa |
+| [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md) | Fases F0–F8, Definition of Done, estrategia de medición y resultados con sus decisiones |

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="260" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+<rect width="760" height="260" rx="10" fill="#0d1117"/>
+<text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="600">Latencia medida en RTX Ada 8 GB (WSL2, KITTI 0001) · presupuesto 60 Hz</text>
+<text x="20" y="71" fill="#c9d1d9">Detector 2D (TensorRT FP16), P95</text>
+<rect x="290" y="58" width="420" height="18" rx="4" fill="#161b22"/>
+<rect x="290" y="58" width="55.4" height="18" rx="4" fill="#3fb950"/>
+<text x="351.4" y="71" fill="#e6edf3">2.64 ms</text>
+<text x="20" y="105" fill="#c9d1d9">Detector extremo a extremo, P95</text>
+<rect x="290" y="92" width="420" height="18" rx="4" fill="#161b22"/>
+<rect x="290" y="92" width="79.0" height="18" rx="4" fill="#3fb950"/>
+<text x="375.0" y="105" fill="#e6edf3">3.76 ms</text>
+<text x="20" y="139" fill="#c9d1d9">Fusión métrica F4 (CPU), P95</text>
+<rect x="290" y="126" width="420" height="18" rx="4" fill="#161b22"/>
+<rect x="290" y="126" width="69.3" height="18" rx="4" fill="#3fb950"/>
+<text x="365.3" y="139" fill="#e6edf3">3.30 ms</text>
+<text x="20" y="173" fill="#c9d1d9">Captura → alerta, P50</text>
+<rect x="290" y="160" width="420" height="18" rx="4" fill="#161b22"/>
+<rect x="290" y="160" width="124.5" height="18" rx="4" fill="#3fb950"/>
+<text x="420.5" y="173" fill="#e6edf3">5.93 ms</text>
+<text x="20" y="207" fill="#c9d1d9">Captura → alerta, P99</text>
+<rect x="290" y="194" width="420" height="18" rx="4" fill="#161b22"/>
+<rect x="290" y="194" width="189.0" height="18" rx="4" fill="#3fb950"/>
+<text x="485.0" y="207" fill="#e6edf3">9.00 ms</text>
+<line x1="640.7" y1="48" x2="640.7" y2="238" stroke="#d29922" stroke-width="2" stroke-dasharray="5 4"/>
+<text x="580.7" y="252" fill="#d29922">16.7 ms (60 Hz)</text>
+</svg>
