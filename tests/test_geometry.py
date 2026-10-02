@@ -322,7 +322,7 @@ def test_negative_camera_height_rejected() -> None:
 
 def test_yaml_config_loading() -> None:
     """Validate config round-trip from configs/camera_kitti.yaml."""
-    yaml_path = Path("configs/camera_kitti.yaml")
+    yaml_path = Path(__file__).resolve().parents[1] / "configs" / "camera_kitti.yaml"
     assert yaml_path.is_file(), "configs/camera_kitti.yaml must exist."
 
     intrinsics, extrinsics = load_camera_config_yaml(yaml_path)

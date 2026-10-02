@@ -3,6 +3,7 @@ name = "percepcion3d"
 version = "0.1.0"
 description = "Edge-Ready 3D Spatial Perception and Metric Tracking Pipeline"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11,<3.12"
 authors = [{ name = "Perception Team" }]
 # Pure-CPU core: geometry, fusion, tracking, safety. Installable without a GPU.

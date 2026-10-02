@@ -27,13 +27,13 @@ jobs:
           uv pip install --system -e ".[dev]"
 
       - name: Run Ruff (Linter)
-        run: ruff check src tests
+        run: ruff check src scripts tests
 
       - name: Run Ruff (Format check)
-        run: ruff format --check src tests
+        run: ruff format --check src scripts tests
 
       - name: Run Mypy (Strict Type Checking)
-        run: mypy src tests
+        run: mypy src scripts tests
 
       - name: Run Unit Tests (Pytest — CPU / no GPU)
         run: pytest tests/ -v -m "not slow and not gpu"
