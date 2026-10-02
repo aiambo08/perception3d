@@ -532,7 +532,7 @@ def test_pitch_filter_reports_discarded_measurements_and_loads_config() -> None:
     assert st.n_discarded_last == 2 and st.n_updates == 1
     st = est.update(th[:2], np.full(2, np.deg2rad(0.3)), 100_000_000)
     assert st.n_discarded_last == 0
-    _, _, pit = load_solver_configs(Path("configs/fusion.yaml"))
+    _, _, pit = load_solver_configs(ROOT / "configs" / "fusion.yaml")
     assert pit.robust_r and pit.soft_gate and pit.reset_after_gated == 10
     leg = pit.legacy()
     assert not leg.robust_r and not leg.soft_gate and leg.reset_after_gated == 0
