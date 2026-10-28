@@ -20,7 +20,11 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from percepcion3d.eval.bdd import load_det_frame_meta, pick_demo_candidates, resolve_image_path  # noqa: E402
+from percepcion3d.eval.bdd import (  # noqa: E402
+    load_det_frame_meta,
+    pick_demo_candidates,
+    resolve_image_path,
+)
 
 
 def main() -> None:
@@ -75,7 +79,7 @@ def main() -> None:
         raise SystemExit(f"cannot read {paths[0]}")
     h, w = first.shape[:2]
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fourcc = cv2.VideoWriter.fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(args.out), fourcc, args.fps, (w, h))
     if not writer.isOpened():
         raise SystemExit(f"VideoWriter failed for {args.out}")

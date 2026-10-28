@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+from typing import Any
 
 NAME_MAP = {"person": "pedestrian", "bike": "bicycle", "motor": "motorcycle"}
 DET_CLASSES = {
@@ -37,12 +37,12 @@ DET_CLASSES = {
 }
 
 
-def _objects_from_2018(doc: dict) -> list[dict]:
+def _objects_from_2018(doc: dict[str, Any]) -> list[dict[str, Any]]:
     frames = doc.get("frames") or ()
     if not frames:
         return []
     objects = frames[0].get("objects") or ()
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for obj in objects:
         cat = NAME_MAP.get(str(obj.get("category") or ""), str(obj.get("category") or ""))
         if cat not in DET_CLASSES or "box2d" not in obj:
@@ -59,7 +59,7 @@ def _objects_from_2018(doc: dict) -> list[dict]:
 
 
 def convert_split(split_dir: Path, out_file: Path) -> tuple[int, int]:
-    frames: list[dict] = []
+    frames: list[dict[str, Any]] = []
     n_boxes = 0
     for path in sorted(split_dir.glob("*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -104,8 +104,7 @@ def main() -> None:
     split_dir = next((p for p in candidates if p is not None and p.is_dir()), None)
     if split_dir is None:
         raise SystemExit(
-            f"2018 labels dir not found under {args.root}; "
-            "unzip bdd100k_labels.zip first"
+            f"2018 labels dir not found under {args.root}; unzip bdd100k_labels.zip first"
         )
     out = args.out or (args.root / "labels" / "det_20" / f"det_{args.split}.json")
     n_img, n_box = convert_split(split_dir, out)
