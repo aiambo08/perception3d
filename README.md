@@ -31,6 +31,7 @@ Ego a 12 m/s, coche delante acercándose, adelantamiento, coche de frente y peat
 - [Arquitectura del pipeline](#arquitectura-del-pipeline)
 - [Resultados medidos](#resultados-medidos)
 - [Inicio rápido](#inicio-rápido)
+- [Cámara real · BDD100K](#cámara-real--bdd100k)
 - [Reproducir cada fase](#reproducir-cada-fase)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Desarrollo](#desarrollo)
@@ -141,8 +142,9 @@ Todo medido en el hardware objetivo: **RTX Ada 8 GB bajo WSL2**, KITTI tracking/
 > [!NOTE]
 > **Limitaciones conocidas.** El RMSE de velocidad global de F5 (≈ 1.10 m/s frente a 1.0) está limitado
 > por el error de rango de F4, correlado en el tiempo; el estado de sesgo de rango del Kalman
-> (`--range-bias`) se midió en 21 secuencias y no mejora (queda desactivado). Todo lo medido es
-> KITTI reproducido; falta validar con cámara real.
+> (`--range-bias`) se midió en 21 secuencias y no mejora (queda desactivado). Las métricas 3D (AbsRel,
+> RMSE de velocidad) siguen siendo KITTI; el salto a cámara real empieza por BDD100K (detección 2D,
+> tracking 2D y lazo F7 a 720p) — ver [Cámara real · BDD100K](#cámara-real--bdd100k).
 > Detalle y decisiones en [`docs/01_plan_fases_mvp.md`](docs/01_plan_fases_mvp.md).
 
 ## Inicio rápido
@@ -165,6 +167,61 @@ Con GPU NVIDIA (TensorRT 10, CUDA 12):
 uv pip install -e ".[runtime]"                               # tensorrt-cu12, cuda-python, rerun-sdk, nvidia-ml-py
 bash scripts/run_pipeline.sh kitti-tracking ~/datasets/kitti/tracking/training 0001 --ego oxts
 ```
+
+## Cámara real · BDD100K
+
+El pipeline ya acepta cualquier MP4/MOV con un YAML de cámara. BDD100K es el salto más
+barato a dashcam real antes de vídeos propios o nuScenes (métricas 3D fuera de KITTI).
+**Todo el flujo GPU se ejecuta en WSL** (`scripts/wsl_env.sh`: venv en `~/.venvs/perception3d`).
+
+### Resultados medidos (720p @ 30 Hz, RTX 4060 Laptop)
+
+| Fase | Config | Resultado |
+|---|---|---|
+| F2 · recall car / peatón (smoke 200, engine 672×384) | labels 2018→det_20 | 57 % / 38 % (IC95 en el JSON) |
+| F2 · recall car / peatón (10k val, engine KITTI 1024×320) | mismo GT | 54 % / 30 % |
+| F7 · captura→alerta P50 / P95 / **P99** | detector **672×384** + depth 840×252 | 6.6 / 14.4 / **16.6 ms** (DoD ≤ 16.7 → PASS) |
+| F7 · profundidad | cadencia adaptativa | **15 Hz** (DoD KITTI ≥ 25 → FAIL: turnaround ~34 ms) |
+| F7 · descartes / VRAM | — | 0 % / ~400 MB → PASS |
+
+El detector KITTI 1024×320 (aspecto 3.2:1) en 16:9 deja ~45 % de letterbox; el
+`configs/models_bdd.yaml` (672×384 ≈ 16:9) baja el P99 de ~22 ms a **16.6 ms**.
+
+### Descarga (espejo Berkeley; ETH caído)
+
+Fuente verificada: `http://dl.yf.io/bdd100k/` (HTTP, red de confianza). El ZIP
+`bdd100k_det_20_labels.zip` del portal está mal empaquetado (2k JPG); usar
+`bdd100k_labels.zip` (2018) y convertir con `scripts/convert_bdd_labels_2018_to_det20.py`.
+
+| Paquete | Para qué | Tamaño |
+|---|---|---|
+| 100K Images + labels 2018→det_20 | F2 recall | ~5.5 GB imágenes + 181 MB labels |
+| Clip demo (keyframes) | F7 sin el 1,8 TB de vídeo | `make_bdd_demo_video.py` |
+| MOT 2020 | F5 2D (labels públicos a menudo offline) | opcional |
+
+```bash
+# En Ubuntu WSL:
+cd ~/perception3d   # o la ruta del repo bajo /mnt/c/...
+export BDD=/mnt/c/Users/$USER/datasets/bdd100k
+
+bash scripts/download_bdd100k.sh eval    # labels 2018 + images 100k + det_val.json
+# F2
+bash scripts/run_bdd_eval_wsl.sh --config configs/models_bdd.yaml \
+  --engine models/detector_672x384_fp16.engine --json reports/f2_bdd_val.json
+# F7 (genera clip hold si falta)
+DET_ENGINE=models/detector_672x384_fp16.engine \
+MODELS_CFG=configs/models_bdd.yaml \
+bash scripts/run_bdd_f7_wsl.sh
+# Export del detector 16:9 (si aún no está el engine)
+bash scripts/build_bdd_detector_wsl.sh --f2-smoke --f7
+```
+
+Intrínsecas estimadas en `configs/camera_bdd.yaml` (BDD no publica \(K\)): 1280×720,
+HFOV≈78° → fx≈790, \(h\)≈1,3 m, pitch 0.
+
+> **Fase 2 (métricas 3D fuera de KITTI).** nuScenes mini (~4 GB, CC BY-NC-SA 4.0, registro)
+> aporta 6 cámaras + LiDAR + calibración y ego pose para re-medir AbsRel (F4) y RMSE (F5).
+> Requiere un loader nuevo con el devkit; hazlo solo si un revisor pide números 3D no-KITTI.
 
 <details>
 <summary><b>Arranque desde cero en WSL2 (Windows 11)</b></summary>
@@ -315,6 +372,8 @@ bash scripts/run_pipeline.sh kitti-tracking <kitti_tracking/training> 0001 --ego
 CAPTURE_THREAD=1 TELEMETRY=none bash scripts/run_pipeline.sh kitti-tracking <kitti_tracking/training> 0001
 # Vídeo cualquiera (intrínsecas de --camera) o KITTI raw
 bash scripts/run_pipeline.sh video <clip.mp4> --camera configs/camera_kitti.yaml
+# Dashcam real BDD100K (configs/camera_bdd.yaml = intrínsecas estimadas)
+HZ=30 bash scripts/run_pipeline.sh video <bdd_clip.mov> --camera configs/camera_bdd.yaml
 bash scripts/run_pipeline.sh kitti-raw <2011_09_26_drive_0005_sync>
 ```
 
@@ -365,10 +424,10 @@ repo.
 
 ```text
 perception3d/
-├── configs/            # cámara, modelos, fusión, tracking (sintético / KITTI) y seguridad (YAML)
+├── configs/            # cámara (KITTI / BDD), modelos, fusión, tracking y seguridad (YAML)
 ├── docker/             # Dockerfile.trt: imagen nvidia/cuda pinada para regenerar engines
 ├── docs/               # análisis crítico, plan por fases con DoD y assets del README
-├── scripts/            # export ONNX/TRT, benchmarks, evaluaciones KITTI/sintéticas, runner del lazo
+├── scripts/            # export ONNX/TRT, benches, eval KITTI/BDD/sintéticas, runner del lazo
 ├── src/percepcion3d/
 │   ├── camera/         # intrínsecas, extrínsecas, geometría pinhole, rectificación
 │   ├── io/             # fuentes KITTI, vídeo, V4L2
@@ -379,7 +438,7 @@ perception3d/
 │   ├── runtime/        # CUDA, TrtEngine, buffers, lazo dual-rate
 │   ├── telemetry/      # sinks asíncronos y Rerun
 │   ├── sim/            # escenas sintéticas deterministas
-│   ├── eval/           # métricas KITTI y sintéticas por fase
+│   ├── eval/           # métricas KITTI, BDD100K y sintéticas por fase
 │   └── utils/          # profiling P50/P95/P99, VRAM (NVML), histórico de benchmarks
 └── tests/              # pytest (markers slow y gpu)
 ```

@@ -1035,8 +1035,9 @@ importable y testable sin GPU; todo backend de GPU está detrás de un protocolo
 1. **Velocidad (F5).** RMSE ≈ 1.10 m/s en 0–30 m frente al objetivo de 1.0; 1.83 m/s en tracks
    jóvenes. Causa establecida: el error de rango de F4 es una escala casi constante por objeto
    (autocorrelación 0.77 a 2 s), inobservable para el filtro y no promediable.
-2. **Todo es KITTI reproducido.** Sin validación con cámara real: intrínsecas, altura y pitch
-   de montaje propios, iluminación y lentes distintas.
+2. **Métricas 3D solo en KITTI.** BDD100K cubre detección 2D, tracking 2D y el lazo F7 a 720p
+   real (`configs/camera_bdd.yaml`, intrínsecas estimadas); AbsRel / RMSE de velocidad fuera de
+   KITTI quedan para nuScenes si un revisor las pide.
 3. **Parón de 230 ms** aislado en F7 sin diagnosticar (recolector de basura, WDDM o E/S).
 4. **Alertas F6** validadas solo en escenarios sintéticos; sin métrica de falsos
    positivos/negativos frente a GT real.
