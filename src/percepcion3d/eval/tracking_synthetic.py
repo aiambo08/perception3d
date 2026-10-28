@@ -1,4 +1,4 @@
-"""Synthetic evaluation of the F5 tracker (DoD of ``docs/01_plan_fases_mvp.md``).
+"""Synthetic evaluation of the F5 tracker (DoD of ``docs/01_mvp_phase_plan.md``).
 
 A small world simulator (independent of the tracker's own conventions): the ego
 vehicle drives an arc at constant speed ``v`` and yaw rate ``ω``; objects move at

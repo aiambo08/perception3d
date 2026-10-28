@@ -1,6 +1,6 @@
 """F5 on KITTI tracking: ID switches, relative-velocity RMSE (0–30 m), static labelling.
 
-DoD (docs/01_plan_fases_mvp.md): 3 sequences; RMSE of the relative velocity ≤ 1.0 m/s at
+DoD (docs/01_mvp_phase_plan.md): 3 sequences; RMSE of the relative velocity ≤ 1.0 m/s at
 0–30 m; with ``--ego oxts`` ≥ 90 % of GT-static objects labelled static after 0.5 s.
 
 Ego-motion: ``--ego oxts`` reads ``<root>/oxts/<seq>.txt`` (``data_tracking_oxts.zip``);

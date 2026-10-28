@@ -27,7 +27,7 @@ depend on how an interval is split into steps (the discrete ``Δt⁴/4`` model
 does), which matters with the jittered timestamps of the dual-rate pipeline.
 
 Measurements are positions ``(X, Z)`` with a full 2×2 covariance (the
-converted-measurement design I of ``docs/00_analisis_critico.md`` §3.4). A
+converted-measurement design I of ``docs/00_critical_analysis.md`` §3.4). A
 measurement ``lag`` seconds older than the state (depth map from an earlier
 frame, R6) is applied by retrodiction: ``z = p − V·lag + w`` with
 ``H = [I, −lag·I]`` and ``R ← R + q·lag³/3·I``.

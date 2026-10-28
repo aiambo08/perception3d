@@ -1,4 +1,4 @@
-"""Synthetic evaluation of the F4 metric fusion (DoD of ``docs/01_plan_fases_mvp.md``).
+"""Synthetic evaluation of the F4 metric fusion (DoD of ``docs/01_mvp_phase_plan.md``).
 
 A :class:`~percepcion3d.sim.synthetic.SyntheticScene` renders dense relative
 inverse-depth maps and detections with known ground truth; the true camera

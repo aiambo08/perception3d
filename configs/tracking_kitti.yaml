@@ -1,5 +1,5 @@
 # Sintonía KITTI/producción: igual que tracking.yaml salvo dynamics.vehicle.q (barrido de 21
-# secuencias, docs/01_plan_fases_mvp.md F5). tracking.yaml (q=1) queda para el DoD sintético.
+# secuencias, docs/01_mvp_phase_plan.md F5). tracking.yaml (q=1) queda para el DoD sintético.
 # F5 · Tracking 3D (tracking/byte_tracker.py, tracking/kalman_filter.py, tracking/tracker3d.py)
 
 byte_track:

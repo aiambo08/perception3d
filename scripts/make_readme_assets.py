@@ -65,7 +65,7 @@ LEVEL_BGR = {
 CLS_BGR = {"car": (170, 120, 60), "pedestrian": (90, 60, 170)}
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# Measured on the target GPU (RTX Ada 8 GB, WSL2), docs/01_plan_fases_mvp.md F7/F8.
+# Measured on the target GPU (RTX Ada 8 GB, WSL2), docs/01_mvp_phase_plan.md F7/F8.
 LATENCY_MS = [
     ("Detector 2D (TensorRT FP16), P95", 2.64),
     ("Detector extremo a extremo, P95", 3.76),

@@ -1,4 +1,4 @@
-"""Synthetic battery for the F6 alert machine (DoD of ``docs/01_plan_fases_mvp.md``).
+"""Synthetic battery for the F6 alert machine (DoD of ``docs/01_mvp_phase_plan.md``).
 
 Kinematic truth (ego front frame, constant relative velocity per object) plus Gaussian
 measurement noise with the covariance the tracker would report
