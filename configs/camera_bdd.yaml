@@ -1,0 +1,17 @@
+# BDD100K dashcam (1280×720 @ 30 fps). Intrinsics are *estimated*: BDD does not
+# publish K. HFOV ≈ 78° → fx = fy = width / (2·tan(HFOV/2)) ≈ 790 px.
+# Extrinsics: typical cabin-mounted dashcam height; pitch assumed level.
+# Marked for qualitative 3D / pipeline loop only — not for AbsRel outside KITTI.
+intrinsics:
+  fx: 790.33                 # estimated (HFOV ≈ 78°)
+  fy: 790.33                 # estimated
+  cx: 640.0
+  cy: 360.0
+  width: 1280
+  height: 720
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+  # estimation_notes: fx/fy from HFOV≈78°; cx/cy = image centre; no distortion model
+
+extrinsics:
+  camera_height_m: 1.30      # approximate dashcam mount
+  pitch_deg: 0.0             # unknown; treat as level for first real-camera pass
