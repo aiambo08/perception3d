@@ -34,7 +34,8 @@ detector:
 depth:
   weights: depth-anything/Depth-Anything-V2-Small-hf
   variant: relative
-  input_sizes: [[280, 924], [252, 840], [322, 1064]]
+  # 210×700 (~0.7× area of 252×840) for BDD F7 depth-Hz headroom; multiples of 14.
+  input_sizes: [[280, 924], [252, 840], [322, 1064], [210, 700]]
   onnx: models/depth_{w}x{h}.onnx
   engine: models/depth_{w}x{h}_fp16.engine
   precision: fp16

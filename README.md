@@ -15,11 +15,11 @@ alertas de colisión TTC/CPA deterministas, con un lazo *dual-rate* medido en GP
 ![mypy](https://img.shields.io/badge/types-mypy%20strict-2A6DB2)
 ![CI](https://github.com/aiambo08/perception3d/actions/workflows/ci.yml/badge.svg)
 
-<img src="docs/assets/demo.gif" alt="Demo: detector, profundidad relativa, tracking 3D y alertas TTC" width="900">
+<img src="docs/assets/demo.gif" alt="Demo BDD100K: detector YOLO TensorRT sobre dashcam real (noche / lluvia / autopista)" width="900">
 
-<sub>Demo generada con <code>scripts/make_readme_assets.py</code>: escena sintética (cajas ruidosas y mapa de
-1/Z afín, como el de Depth Anything) procesada por el código real de fusión F4, tracking F5 y alertas F6.
-Ego a 12 m/s, coche delante acercándose, adelantamiento, coche de frente y peatón cruzando.</sub>
+<sub>Demo generada con <code>scripts/make_bdd_readme_gif.py</code>: keyframes reales BDD100K val
+(noche urbana, lluvia, autopista) + cajas del detector TensorRT 672×384. La escena sintética F4–F6
+sigue disponible con <code>scripts/make_readme_assets.py</code>.</sub>
 
 </div>
 
@@ -178,14 +178,17 @@ barato a dashcam real antes de vídeos propios o nuScenes (métricas 3D fuera de
 
 | Fase | Config | Resultado |
 |---|---|---|
-| F2 · recall car / peatón (smoke 200, engine 672×384) | labels 2018→det_20 | 57 % / 38 % (IC95 en el JSON) |
+| F2 · recall car / peatón (**10k** val, engine **672×384**) | labels 2018→det_20 | **57.4 % / 34.5 %** ([57.0, 57.8] / [33.6, 35.4]) |
 | F2 · recall car / peatón (10k val, engine KITTI 1024×320) | mismo GT | 54 % / 30 % |
-| F7 · captura→alerta P50 / P95 / **P99** | detector **672×384** + depth 840×252 | 6.6 / 14.4 / **16.6 ms** (DoD ≤ 16.7 → PASS) |
-| F7 · profundidad | cadencia adaptativa | **15 Hz** (DoD KITTI ≥ 25 → FAIL: turnaround ~34 ms) |
-| F7 · descartes / VRAM | — | 0 % / ~400 MB → PASS |
+| F7 · captura→alerta P50 / P95 / **P99** | det 672×384 + depth **700×210** | 7.2 / 14.3 / **16.6 ms** (DoD ≤ 16.7 → PASS) |
+| F7 · profundidad | dual-rate @ 30 Hz | **15 Hz** (GPU P50 ≈ 3.9 ms; turnaround ≈ 1 frame → techo ~15 Hz; DoD KITTI ≥ 25 es para lazo 60 Hz) |
+| F7 · descartes / VRAM | — | 0 % / ~230 MB → PASS |
+| Demo README | noche / lluvia / autopista | `docs/assets/demo.gif` vía `make_bdd_readme_gif.py` |
 
 El detector KITTI 1024×320 (aspecto 3.2:1) en 16:9 deja ~45 % de letterbox; el
 `configs/models_bdd.yaml` (672×384 ≈ 16:9) baja el P99 de ~22 ms a **16.6 ms**.
+Depth 700×210 (múltiplo de 14) reduce `depth.gpu` frente a 840×252; el Hz lo acota
+el lazo (enqueue → consume al frame siguiente), no el motor.
 
 ### Descarga (espejo Berkeley; ETH caído)
 
@@ -196,8 +199,9 @@ Fuente verificada: `http://dl.yf.io/bdd100k/` (HTTP, red de confianza). El ZIP
 | Paquete | Para qué | Tamaño |
 |---|---|---|
 | 100K Images + labels 2018→det_20 | F2 recall | ~5.5 GB imágenes + 181 MB labels |
-| Clip demo (keyframes) | F7 sin el 1,8 TB de vídeo | `make_bdd_demo_video.py` |
-| MOT 2020 | F5 2D (labels públicos a menudo offline) | opcional |
+| Clip demo (keyframes) | F7 / GIF sin el 1,8 TB de vídeo | `make_bdd_demo_video.py` / `make_bdd_readme_gif.py` |
+| MOT 2020 images | F5 2D | `mot20/images20-track-val-1.zip` (espejo OK) |
+| MOT 2020 labels (`box_track_20`) | F5 IDSW | **offline** en ETH/Berkeley ([bdd100k#369](https://github.com/bdd100k/bdd100k/issues/369)) |
 
 ```bash
 # En Ubuntu WSL:
@@ -205,19 +209,25 @@ cd ~/perception3d   # o la ruta del repo bajo /mnt/c/...
 export BDD=/mnt/c/Users/$USER/datasets/bdd100k
 
 bash scripts/download_bdd100k.sh eval    # labels 2018 + images 100k + det_val.json
-# F2
+# F2 (10k)
 bash scripts/run_bdd_eval_wsl.sh --config configs/models_bdd.yaml \
-  --engine models/detector_672x384_fp16.engine --json reports/f2_bdd_val.json
+  --engine models/detector_672x384_fp16.engine --json reports/f2_bdd_val_672x384.json
 # F7 (genera clip hold si falta)
 DET_ENGINE=models/detector_672x384_fp16.engine \
 MODELS_CFG=configs/models_bdd.yaml \
+DEPTH_ENGINE=models/depth_700x210_fp16.engine \
 bash scripts/run_bdd_f7_wsl.sh
+# GIF real para el README
+uv run --extra runtime python scripts/make_bdd_readme_gif.py --root "$BDD" \
+  --engine models/detector_672x384_fp16.engine --config configs/models_bdd.yaml
 # Export del detector 16:9 (si aún no está el engine)
 bash scripts/build_bdd_detector_wsl.sh --f2-smoke --f7
 ```
 
 Intrínsecas estimadas en `configs/camera_bdd.yaml` (BDD no publica \(K\)): 1280×720,
 HFOV≈78° → fx≈790, \(h\)≈1,3 m, pitch 0.
+
+Detalle de espejos / MOT / nuScenes: [`docs/03_datasets_reales.md`](docs/03_datasets_reales.md).
 
 > **Fase 2 (métricas 3D fuera de KITTI).** nuScenes mini (~4 GB, CC BY-NC-SA 4.0, registro)
 > aporta 6 cámaras + LiDAR + calibración y ego pose para re-medir AbsRel (F4) y RMSE (F5).

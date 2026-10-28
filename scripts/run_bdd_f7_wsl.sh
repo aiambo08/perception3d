@@ -17,9 +17,11 @@ VIDEO="${VIDEO:-$REPO/data/outputs/bdd_demo_hold_720p30.mp4}"
 REPORT="${REPORT:-$REPO/reports/f7_bdd.json}"
 DET_ENGINE="${DET_ENGINE:-models/detector_1024x320_fp16.engine}"
 MODELS_CFG="${MODELS_CFG:-configs/models.yaml}"
-# Prefer locally rebuilt 840x252 when present; else 924x280.
+# Prefer smaller BDD depth when present (700×210 → 840×252 → 924×280).
 if [[ -z "${DEPTH_ENGINE:-}" ]]; then
-  if [[ -f "$REPO/models/depth_840x252_fp16.engine" ]]; then
+  if [[ -f "$REPO/models/depth_700x210_fp16.engine" ]]; then
+    DEPTH_ENGINE=models/depth_700x210_fp16.engine
+  elif [[ -f "$REPO/models/depth_840x252_fp16.engine" ]]; then
     DEPTH_ENGINE=models/depth_840x252_fp16.engine
   else
     DEPTH_ENGINE=models/depth_924x280_fp16.engine
